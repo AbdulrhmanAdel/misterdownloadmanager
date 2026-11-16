@@ -427,6 +427,7 @@ enum Cmd {
     VerifyChecksum,
     /// Right-click → Extract (beyond IDM, #37): a finished archive, into its folder.
     Extract,
+    ToggleExtract,
     /// Tasks → Link grabber… (#37): the window, empty (links pasted in) or as it is.
     LinkGrabber,
     /// Downloads → Find (Ctrl-F) / Find Next (F3).
@@ -2018,6 +2019,38 @@ impl App {
 
     /// The downloads a command acts on: those selected, in list order; a right-clicked one
     /// outside the selection alone.
+    /// An archive that hasn't finished: "Extract when done" can still be changed.
+    fn can_toggle_extract(i: &Item) -> bool {
+        i.status != Status::Complete
+            && i.torrent.is_none()
+            && i.video.is_none()
+            && crate::extractq::archive_name(&i.file_name)
+    }
+
+    /// Is "Extract when done" on for every one of these downloads that can change it.
+    fn extract_checked(&self, ids: &[u64]) -> bool {
+        let mut any = false;
+        for i in self
+            .items
+            .iter()
+            .filter(|i| ids.contains(&i.id) && Self::can_toggle_extract(i))
+        {
+            any = true;
+            let on = i.package.as_ref().map_or_else(
+                || {
+                    i.extract
+                        .as_ref()
+                        .map_or(self.settings.extract_auto, |e| e.auto)
+                },
+                |p| p.extract,
+            );
+            if !on {
+                return false;
+            }
+        }
+        any
+    }
+
     fn targets(&self, target: Option<u64>) -> Vec<u64> {
         match target {
             Some(t) if !self.selection.contains(t) => vec![t],
@@ -3109,6 +3142,7 @@ impl App {
                         address: Some(url),
                         move_to: None,
                         direct: None,
+                        extract: None,
                     };
                     self.apply_properties(c);
                 }
@@ -4766,8 +4800,11 @@ impl App {
         }
         let route = self.debrid_route();
         if let Some(item) = self.items.iter().find(|i| i.id == id) {
-            self.properties
-                .push(crate::properties::Properties::new(item, route));
+            self.properties.push(crate::properties::Properties::new(
+                item,
+                route,
+                &self.settings,
+            ));
         }
     }
 
@@ -4776,6 +4813,9 @@ impl App {
     fn apply_properties(&mut self, c: crate::properties::Changes) {
         let Some(item) = self.item(c.id) else { return };
         item.description = c.description;
+        if let Some(x) = c.extract {
+            item.extract = Some(x);
+        }
         item.login = c.login;
         item.set_referer(c.referer);
         let state = mdm_engine::state::state_path(&item.dest);
@@ -7538,6 +7578,30 @@ impl App {
                     }
                 }
             }
+            Cmd::ToggleExtract => {
+                let ids = self.targets(target);
+                let on = !self.extract_checked(&ids);
+                let global = (self.settings.extract_to_custom
+                    && !self.settings.extract_to.trim().is_empty())
+                .then(|| PathBuf::from(self.settings.extract_to.trim()));
+                for item in self
+                    .items
+                    .iter_mut()
+                    .filter(|i| ids.contains(&i.id) && Self::can_toggle_extract(i))
+                {
+                    if let Some(p) = item.package.as_mut() {
+                        p.extract = on;
+                    } else {
+                        let to = item
+                            .extract
+                            .as_ref()
+                            .and_then(|e| e.to.clone())
+                            .or_else(|| global.clone());
+                        item.extract = Some(model::ItemExtract { auto: on, to });
+                    }
+                }
+                self.dirty = true;
+            }
             Cmd::VerifyChecksum => {
                 if let Some(id) = target
                     && !self.checksums.iter().any(|c| c.id == id)
@@ -8853,6 +8917,9 @@ impl App {
                 && i.video.is_none()
                 && crate::extractq::archive_name(&i.file_name)
         });
+        let can_toggle = chosen.iter().any(|i| Self::can_toggle_extract(i));
+        let toggle_ids: Vec<u64> = chosen.iter().map(|i| i.id).collect();
+        let extract_on = self.extract_checked(&toggle_ids);
         let torrent = it.and_then(|i| i.torrent.as_ref().map(|t| (i, t)));
         let mut entries = vec![
             // i18n: verb: opens the downloaded file
@@ -8883,6 +8950,13 @@ impl App {
             I("Verify checksum...", Cmd::VerifyChecksum, sel, false),
             // i18n: verb: unpack the downloaded archive (zip, 7z, rar) into its folder
             I("Extract", Cmd::Extract, extractable, false),
+            // i18n: check item: unpack the archive into its folder when it has downloaded
+            I(
+                "Extract when done",
+                Cmd::ToggleExtract,
+                can_toggle,
+                extract_on,
+            ),
             Sep,
             // i18n: verb: removes the download from the list
             I("Remove", Cmd::Remove, any_idle, false),
@@ -14510,6 +14584,7 @@ mod start_disk_tests {
             address: Some(new.clone()),
             move_to: None,
             direct: None,
+            extract: None,
         });
         assert!(at.elapsed() < AT_ONCE, "the window doesn't wait");
         assert_eq!(get(&app, 1).url, new);

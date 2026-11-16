@@ -22,6 +22,8 @@ pub struct Changes {
     pub move_to: Option<PathBuf>,
     /// "Through …" changed (#44): downloaded directly (true) or through the account again.
     pub direct: Option<bool>,
+    /// "Extract when done" and its folder, when the row was shown.
+    pub extract: Option<crate::model::ItemExtract>,
 }
 
 pub struct Properties {
@@ -40,10 +42,20 @@ pub struct Properties {
     route: crate::debrid::Route,
     direct: bool,
     files_requested: bool,
+    /// The extract row: shown for an archive that isn't a torrent, a video or a package's.
+    extract_row: bool,
+    extract_auto: bool,
+    extract_to: String,
+    /// The row as it opened: OK keeps the download's own choice (or Options') when untouched.
+    extract_was: (bool, String),
 }
 
 impl Properties {
-    pub fn new(item: &Item, route: crate::debrid::Route) -> Self {
+    pub fn new(
+        item: &Item,
+        route: crate::debrid::Route,
+        settings: &crate::settings::Settings,
+    ) -> Self {
         let (login, password) = item.login.clone().unwrap_or_default();
         let stream = *item.file_address() != item.url;
         Properties {
@@ -59,7 +71,31 @@ impl Properties {
             route,
             direct: item.direct,
             files_requested: false,
+            extract_row: item.torrent.is_none()
+                && item.video.is_none()
+                && item.package.is_none()
+                && crate::extractq::archive_name(&item.file_name),
+            extract_auto: item
+                .extract
+                .as_ref()
+                .map_or(settings.extract_auto, |e| e.auto),
+            extract_to: String::new(),
+            extract_was: (false, String::new()),
         }
+        .with_extract(item, settings)
+    }
+
+    /// The extract row's start: the download's own choice (a blank folder there is the
+    /// archive's), else Options → Archives'.
+    fn with_extract(mut self, item: &Item, settings: &crate::settings::Settings) -> Self {
+        let to = match &item.extract {
+            Some(e) => e.to.clone(),
+            None => (settings.extract_to_custom && !settings.extract_to.trim().is_empty())
+                .then(|| PathBuf::from(settings.extract_to.trim())),
+        };
+        self.extract_to = to.map(|p| p.display().to_string()).unwrap_or_default();
+        self.extract_was = (self.extract_auto, self.extract_to.clone());
+        self
     }
 
     pub fn take_files_requested(&mut self) -> bool {
@@ -77,7 +113,7 @@ impl Properties {
             ctx,
             &format!("properties-{}", self.id),
             "File Properties",
-            [477.0, 420.0],
+            [477.0, 420.0 + if self.extract_row { 28.0 } else { 0.0 }],
             false,
             LIGHT_BG(),
             |ui, o| self.body(ui, o, icons, item),
@@ -97,6 +133,15 @@ impl Properties {
                     address,
                     move_to: self.move_to.take(),
                     direct: (self.direct != item.direct).then_some(self.direct),
+                    extract: (self.extract_row
+                        && (self.extract_auto, self.extract_to.clone()) != self.extract_was)
+                        .then(|| {
+                            let to = self.extract_to.trim();
+                            crate::model::ItemExtract {
+                                auto: self.extract_auto,
+                                to: (!to.is_empty()).then(|| PathBuf::from(to)),
+                            }
+                        }),
                 })
             }
             Outcome::Closed => Outcome::Closed,
@@ -322,6 +367,45 @@ impl Properties {
             true,
             false,
         );
+        // The extract row (an archive's): the window grows by it, what is below moves down.
+        let ey = if self.extract_row { 28.0 } else { 0.0 };
+        if self.extract_row {
+            winui::checkbox_light(
+                ui,
+                o + vec2(11.0, 241.0),
+                &mut self.extract_auto,
+                // i18n: File Properties: a check box, ticked to extract the archive when it has downloaded
+                crate::i18n::t("Extract when done"),
+                true,
+            );
+            let on = self.extract_auto;
+            winui::edit_light(
+                ui,
+                r(o, col, 236.0, 467.0 - 30.0 - 4.0 - col, 23.0),
+                &mut self.extract_to,
+                on,
+                false,
+            );
+            // i18n: File Properties: the title of the window, and the tooltip of the button, that pick the folder to extract to
+            let title = crate::i18n::t("Choose the folder to extract to");
+            let kind = if on {
+                ButtonKind::Normal
+            } else {
+                ButtonKind::Disabled
+            };
+            if winui::button_light(ui, r(o, 437.0, 236.0, 30.0, 23.0), "...", kind, false)
+                .on_hover_text(title)
+                .clicked()
+            {
+                winui::start_pick(ui.ctx(), "props-extract-to", move || {
+                    crate::winui::file_dialog(title).pick_folder()
+                });
+            }
+            if let Some(dir) = winui::picked(ui.ctx(), "props-extract-to") {
+                self.extract_to = dir.display().to_string();
+            }
+        }
+        let o = o + vec2(0.0, ey);
         winui::etched_h(&p, o.x + 11.0, o.y + 233.0, 456.0);
         text(
             &p,
@@ -333,7 +417,7 @@ impl Properties {
         // A video's page, a file's referer (#795).
         // i18n: the web page is not known
         let page = item.web_page().unwrap_or(crate::i18n::t("Unknown"));
-        fit(ui, 11.0, 272.0, page);
+        fit(ui, 11.0, 272.0 + ey, page);
         winui::etched_h(&p, o.x + 11.0, o.y + 282.0, 456.0);
         // i18n: HTTP term (sic): the page the download was started from
         text(
@@ -405,7 +489,7 @@ impl Properties {
                 crate::i18n::t("Last try  {last}"),
                 &[("last", &last)],
             );
-            fit(ui, 11.0, 396.0, &last_try);
+            fit(ui, 11.0, 396.0 + ey, &last_try);
         }
         // The dialog's own error (a bad address) takes the Result line's place while it lasts.
         if let Some(e) = &self.error {
@@ -567,7 +651,11 @@ mod tests {
             in_order: false,
             ends_first: false,
         });
-        let props = Properties::new(&torrent, crate::debrid::Route::default());
+        let props = Properties::new(
+            &torrent,
+            crate::debrid::Route::default(),
+            &crate::settings::Settings::default(),
+        );
         assert!(!props.address_editable(&torrent));
         assert!(props.address_ok(&torrent));
     }
@@ -576,7 +664,11 @@ mod tests {
     #[test]
     fn a_files_address_is_still_checked() {
         let file = item("https://example.com/file.iso");
-        let mut props = Properties::new(&file, crate::debrid::Route::default());
+        let mut props = Properties::new(
+            &file,
+            crate::debrid::Route::default(),
+            &crate::settings::Settings::default(),
+        );
         assert!(props.address_editable(&file));
         assert!(props.address_ok(&file));
         "not an address".clone_into(&mut props.address);
