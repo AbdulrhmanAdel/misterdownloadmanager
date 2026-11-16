@@ -365,6 +365,11 @@ pub struct Settings {
     /// Into a folder named after the archive: 0 when it holds several things at its top (smart),
     /// 1 always, 2 never.
     pub extract_subfolder: u8,
+    /// Extract into `extract_to` instead of the archive's own folder (JDownloader's "Extract
+    /// to"); never with in place. Off.
+    pub extract_to_custom: bool,
+    /// That folder (empty: the archive's own).
+    pub extract_to: String,
     /// Link grabber: look each link up (name, size, online) when it arrives, as IDM's "Download
     /// all links" does. On.
     pub grabber_check: bool,
@@ -537,6 +542,8 @@ impl Default for Settings {
             extract_delete: false,
             extract_in_place: false,
             extract_subfolder: 0,
+            extract_to_custom: false,
+            extract_to: String::new(),
             grabber_check: true,
             grabber_hide_pages: true,
             cnl_on: false,

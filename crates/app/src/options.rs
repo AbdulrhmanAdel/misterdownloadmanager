@@ -2402,7 +2402,7 @@ impl OptionsDialog {
         );
         let s = &mut self.s;
         // i18n: Options → Archives: group box title
-        group(ui, o, 16.0, 92.0, 392.0, 228.0, "Archives");
+        group(ui, o, 16.0, 92.0, 392.0, 276.0, "Archives");
         winui::checkbox_light(
             ui,
             o + vec2(30.0, 110.0),
@@ -2513,11 +2513,54 @@ impl OptionsDialog {
             },
             has_hatchzip,
         );
-        // i18n: Options → Archives: group box title
-        group(ui, o, 16.0, 320.0, 392.0, 132.0, "Link grabber");
+        // i18n: Options → Archives check box (JDownloader's "Extract to"): the folder below replaces the archive's own
+        let to_tip = if s.extract_in_place {
+            // i18n: Options → Archives, tooltip: extracting in place with HatchZip (a program's name) cannot go elsewhere
+            "Extracting in place always uses the archive's folder."
+        } else {
+            // i18n: Options → Archives, tooltip of the "Extract to" check box
+            "Where the files go: this folder instead of the one the archive is in."
+        };
         winui::checkbox_light(
             ui,
-            o + vec2(30.0, 338.0),
+            o + vec2(30.0, 318.0),
+            &mut s.extract_to_custom,
+            "Extract to this folder instead of the archive's:",
+            true,
+        )
+        .on_hover_text(crate::i18n::t(to_tip));
+        let to_on = s.extract_to_custom;
+        winui::edit_light(
+            ui,
+            r(o, 30.0, 340.0, 330.0, 21.0),
+            &mut s.extract_to,
+            to_on,
+            false,
+        );
+        // i18n: Options → Archives: the title of the window, and the tooltip of the button, that pick the folder to extract to
+        let to_title = crate::i18n::t("Choose the folder to extract to");
+        let to_kind = if to_on {
+            ButtonKind::Normal
+        } else {
+            ButtonKind::Disabled
+        };
+        if winui::button_light(ui, r(o, 365.0, 340.0, 27.0, 21.0), "...", to_kind, false)
+            .on_hover_text(to_title)
+            .clicked()
+        {
+            let title = to_title.to_owned();
+            winui::start_pick(ui.ctx(), "options-extract-to", move || {
+                crate::winui::file_dialog(&title).pick_folder()
+            });
+        }
+        if let Some(dir) = winui::picked(ui.ctx(), "options-extract-to") {
+            s.extract_to = dir.display().to_string();
+        }
+        // i18n: Options → Archives: group box title
+        group(ui, o, 16.0, 368.0, 392.0, 132.0, "Link grabber");
+        winui::checkbox_light(
+            ui,
+            o + vec2(30.0, 434.0),
             &mut s.grabber_check,
             // i18n: Options → Archives → Link grabber check box (IDM's Download all links looks every link up)
             "Look links up when they arrive (name, size, online)",
@@ -2525,14 +2568,14 @@ impl OptionsDialog {
         );
         winui::checkbox_light(
             ui,
-            o + vec2(30.0, 362.0),
+            o + vec2(30.0, 410.0),
             &mut s.grabber_hide_pages,
             "Hide web pages",
             true,
         );
         winui::checkbox_light(
             ui,
-            o + vec2(30.0, 386.0),
+            o + vec2(30.0, 434.0),
             &mut s.cnl_on,
             // i18n: Options → Archives → Link grabber check box: Click'n'Load, a link site's button that sends its links to a program on this computer (port 9666, as JDownloader)
             "Accept Click'n'Load from web pages (port 9666)",
@@ -2541,7 +2584,7 @@ impl OptionsDialog {
         winui::paragraph(
             &p,
             o.x + 30.0,
-            o.y + 418.0,
+            o.y + 466.0,
             crate::i18n::t(
                 "Tasks → Link grabber, or the browser's \"Download all links\": a split\narchive's volumes are one package, the other links of a page another.",
             ),

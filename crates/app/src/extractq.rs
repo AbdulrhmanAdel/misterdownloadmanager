@@ -34,6 +34,8 @@ struct Job {
     /// Right-click → Extract (said again, a missing 7-Zip, each time).
     by_hand: bool,
     subfolder: mdm_extract::Subfolder,
+    /// Options → Archives "Extract to": the folder to extract into (None: the archive's).
+    dest: Option<PathBuf>,
     /// Where the archive came from, for the mark on what it holds.
     url: url::Url,
     referer: Option<String>,
@@ -157,6 +159,10 @@ impl Extracts {
             in_place: settings.extract_in_place,
             by_hand,
             subfolder: settings.extract_into(),
+            dest: (settings.extract_to_custom
+                && !settings.extract_in_place
+                && !settings.extract_to.trim().is_empty())
+            .then(|| PathBuf::from(settings.extract_to.trim())),
             url: first.url.clone(),
             referer: first.context.referer.clone(),
         });
@@ -498,11 +504,17 @@ fn start(job: Job, ctx: &egui::Context) -> Running {
 }
 
 fn run(job: &Job, cancel: &AtomicBool) -> Result<Report, Error> {
-    let dest = job
-        .archive
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let dest = match &job.dest {
+        Some(d) => {
+            std::fs::create_dir_all(d)?;
+            d.clone()
+        }
+        None => job
+            .archive
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+    };
     let size: u64 = job
         .files
         .iter()
