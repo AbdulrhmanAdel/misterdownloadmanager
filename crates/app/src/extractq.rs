@@ -111,7 +111,10 @@ impl Extracts {
         };
         let wanted = match &item.package {
             Some(p) => p.extract,
-            None => settings.extract_auto,
+            None => item
+                .extract
+                .as_ref()
+                .map_or(settings.extract_auto, |e| e.auto),
         };
         if wanted {
             self.offer(item, items, settings, false);
@@ -159,10 +162,14 @@ impl Extracts {
             in_place: settings.extract_in_place,
             by_hand,
             subfolder: settings.extract_into(),
-            dest: (settings.extract_to_custom
-                && !settings.extract_in_place
-                && !settings.extract_to.trim().is_empty())
-            .then(|| PathBuf::from(settings.extract_to.trim())),
+            // Download File Info's choice wins, a blank folder there meaning the archive's own;
+            // without one, Options → Archives. In place always stays beside the archive.
+            dest: match first.extract.as_ref().or(item.extract.as_ref()) {
+                Some(e) => e.to.clone(),
+                None => (settings.extract_to_custom && !settings.extract_to.trim().is_empty())
+                    .then(|| PathBuf::from(settings.extract_to.trim())),
+            }
+            .filter(|_| !settings.extract_in_place),
             url: first.url.clone(),
             referer: first.context.referer.clone(),
         });

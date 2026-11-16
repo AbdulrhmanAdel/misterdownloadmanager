@@ -2386,6 +2386,7 @@ impl App {
         self.number_at_start(id);
         if let Some(item) = self.item(id) {
             item.replace_file = fi.replaces();
+            item.extract = fi.extraction();
         }
         self.selection.set(id);
         if matches!(start, Start::Now) {
@@ -2463,6 +2464,7 @@ impl App {
         item.description = fi.description.clone();
         let moved = item.dest != dest || replace.is_some();
         item.replace_file = replace;
+        item.extract = fi.extraction();
         self.selection.set(id);
         if moved {
             // Another name or folder than the one it started at: the data so far goes and it
@@ -9810,6 +9812,10 @@ impl App {
             ctx,
         );
         fi.remember = self.settings.change_folder_on_last;
+        fi.extract_auto = self.settings.extract_auto;
+        if self.settings.extract_to_custom {
+            fi.extract_to = self.settings.extract_to.clone();
+        }
         fi.folders = self.settings.folder_history.clone();
         self.file_info = Some(fi);
     }

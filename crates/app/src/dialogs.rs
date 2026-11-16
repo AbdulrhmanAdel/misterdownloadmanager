@@ -1071,6 +1071,10 @@ pub struct FileInfo {
     /// "Remember this path for … category"; starts as Options → Save to → "Change folder for
     /// … category on last selected" says.
     pub remember: bool,
+    /// "Extract when done" and the folder to extract to (blank: next to the archive), asked
+    /// for an archive; start as Options → Archives says.
+    pub extract_auto: bool,
+    pub extract_to: String,
     url_text: String,
     /// The URL box holds no address MDM downloads: Start and Later wait.
     url_bad: bool,
@@ -1198,6 +1202,8 @@ impl FileInfo {
             category,
             description: String::new(),
             remember: false,
+            extract_auto: false,
+            extract_to: String::new(),
             probe,
             info,
             kept: None,
@@ -1328,6 +1334,25 @@ impl FileInfo {
         self.replace.clone().filter(|p| *p == self.dest())
     }
 
+    /// Is the extract row shown: Save As names an archive.
+    fn extract_row(&self) -> bool {
+        crate::extractq::archive_name(
+            &Path::new(&self.save_as)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The choice made in the extract row, when it was shown.
+    pub fn extraction(&self) -> Option<crate::model::ItemExtract> {
+        let to = self.extract_to.trim();
+        self.extract_row().then(|| crate::model::ItemExtract {
+            auto: self.extract_auto,
+            to: (!to.is_empty()).then(|| PathBuf::from(to)),
+        })
+    }
+
     /// "Remember this path for … category": the category and the folder to keep for it.
     pub fn remembered(&self) -> Option<(Category, String)> {
         self.remember.then(|| {
@@ -1454,6 +1479,9 @@ impl FileInfo {
         // The "Download through" line (#44) takes a row of its own while an account takes the
         // address: the window grows by it.
         let dy = if self.through.is_some() { 26.0 } else { 0.0 };
+        // The extract row (an archive's): the window grows by it, what is below moves down.
+        let ey = if self.extract_row() { 28.0 } else { 0.0 };
+        let dy = dy + ey;
         // Preview has 92 px for its label in this language (#192), from 8 px after the group box
         // (it ends at 462) to the window's edge (562): where it needs more, the window grows by it
         // and the right column (icon, size, Preview) widens, its centre moving by half of it.
@@ -1627,17 +1655,54 @@ impl FileInfo {
                 // Greyed as IDM shows it, and still copyable.
                 winui::copyable(ui, folder_rc, "remembered-folder", &folder, false);
 
+                if ey > 0.0 {
+                    winui::checkbox(
+                        ui,
+                        o + vec2(96.0, 152.0),
+                        &mut self.extract_auto,
+                        // i18n: Download File Info: a check box, ticked to extract the archive when it has downloaded
+                        crate::i18n::t("Extract when done"),
+                        true,
+                    );
+                    let on = self.extract_auto;
+                    winui::edit(
+                        ui,
+                        r(o, 250.0, 148.0, 176.0, 23.0),
+                        &mut self.extract_to,
+                        on,
+                        false,
+                    );
+                    // i18n: Download File Info: the title of the window, and the tooltip of the button, that pick the folder to extract to
+                    let title = crate::i18n::t("Choose the folder to extract to");
+                    let kind = if on {
+                        ButtonKind::Normal
+                    } else {
+                        ButtonKind::Disabled
+                    };
+                    if winui::button(ui, r(o, 432.0, 148.0, 30.0, 23.0), "...", kind, false, None)
+                        .on_hover_text(title)
+                        .clicked()
+                    {
+                        winui::start_pick(ui.ctx(), "dfi-extract-to", move || {
+                            crate::winui::file_dialog(title).pick_folder()
+                        });
+                    }
+                    if let Some(dir) = winui::picked(ui.ctx(), "dfi-extract-to") {
+                        self.extract_to = dir.display().to_string();
+                    }
+                }
+
                 // i18n: noun: label before a free-text box describing the file
                 winui::text_right(
                     &p,
                     o.x + 87.0,
-                    o.y + 161.0,
+                    o.y + 161.0 + ey,
                     crate::i18n::t("Description"),
                     winui::TEXT(),
                 );
                 winui::edit(
                     ui,
-                    r(o, 96.0, 148.0, 366.0, 23.0),
+                    r(o, 96.0, 148.0 + ey, 366.0, 23.0),
                     &mut self.description,
                     true,
                     false,
@@ -1654,7 +1719,7 @@ impl FileInfo {
                     );
                     winui::checkbox_until(
                         ui,
-                        o + vec2(96.0, 186.0),
+                        o + vec2(96.0, 186.0 + ey),
                         &mut on,
                         &caption,
                         true,

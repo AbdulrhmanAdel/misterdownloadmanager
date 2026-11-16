@@ -504,6 +504,10 @@ pub struct Item {
     /// every volume is there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageTag>,
+    /// What Download File Info chose for extracting this archive; `None` follows Options →
+    /// Archives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<ItemExtract>,
     /// The downloads it was added with (a playlist, a batch, Link grabber's links, #766): the
     /// first one's id. They show one summary once all are done, not a Download complete window
     /// each; cleared once it was summed up. None for a download added alone.
@@ -600,6 +604,15 @@ fn add_written(list: &mut Vec<PathBuf>, more: Vec<PathBuf>) {
             list.push(p);
         }
     }
+}
+
+/// Extract-when-done and where to, as chosen for one download in Download File Info.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemExtract {
+    pub auto: bool,
+    /// The folder to extract into; `None` is next to the archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<PathBuf>,
 }
 
 /// A Link grabber package, as each of its downloads keeps it (#37).
@@ -1167,6 +1180,7 @@ impl Item {
             number_at_start: false,
             replace_file: None,
             package: None,
+            extract: None,
             group: None,
             server: None,
             direct: false,
