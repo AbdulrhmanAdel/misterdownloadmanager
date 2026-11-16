@@ -2480,10 +2480,11 @@ impl App {
                     (i.live.is_some(), i.status == Status::Complete)
                 });
             if complete {
-                // It finished behind the dialog: its box now.
+                // It finished behind the dialog: its box now, and its archive, as just chosen.
                 if self.settings.show_complete {
                     self.complete_window(id);
                 }
+                self.extracts.finished(id, &self.items, &self.settings);
             } else if !live {
                 self.start(id, true);
             } else if self.settings.show_progress && !self.progress.iter().any(|p| p.id == id) {
@@ -7864,7 +7865,10 @@ impl App {
             self.release_link(*id);
             self.failures.remove(id);
             let renaming = self.apply_deferred_rename(*id);
-            if !renaming {
+            // Finished behind its Download File Info: the dialog's answer (extract or not, and
+            // where) isn't in yet; adopt_early offers its archive once it is.
+            let behind = self.file_info.as_ref().and_then(|f| f.early) == Some(*id);
+            if !renaming && !behind {
                 // Its archive, when it is to be extracted and its last volume is in (#37).
                 self.extracts.finished(*id, &self.items, &self.settings);
             }
