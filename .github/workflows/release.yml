@@ -41,6 +41,49 @@ jobs:
           path: crates/geo/data/*
           retention-days: 7
 
+  windows-tests:
+    # This fork: the Windows x64 tests in a job of their own, beside the build (windows below), so
+    # the two take as long as the longer one instead of one after the other. They still gate a
+    # release: publish needs this job to succeed.
+    name: windows-x64-tests
+    needs: geo
+    timeout-minutes: 90
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: geo-data
+          path: crates/geo/data
+
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+
+      # Its own cache key: the build job saves one too, and two jobs must not write the same.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-tests-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-tests-${{ runner.os }}-cargo-
+
+      # BoringSSL and AWS-LC are built with NASM on x64 Windows.
+      - name: NASM
+        shell: pwsh
+        run: |
+          choco install nasm --version 2.16.3 --no-progress -y
+          "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      - name: Tests
+        run: cargo test --workspace --target x86_64-pc-windows-msvc
+
   windows:
     # One build per processor, each on a runner of its own: x64 and 32-bit on GitHub's x64 Windows
     # (32-bit programs run there too, for the tests), ARM64 on its Windows on ARM.
@@ -125,8 +168,7 @@ jobs:
           "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
-      - name: Tests
-        run: cargo test --workspace --target ${{ matrix.target }}
+      # The tests run in the windows-tests job, at the same time as this build.
 
       - name: Inno Setup
         shell: pwsh
@@ -364,8 +406,8 @@ jobs:
     # processor's build failed, and only x64's must be there.
     if: >-
       always() && startsWith(github.ref, 'refs/tags/') && needs.windows.result != 'cancelled' &&
-      needs.extension.result == 'success'
-    needs: [windows, extension, linux]
+      needs.extension.result == 'success' && needs.windows-tests.result == 'success'
+    needs: [windows, windows-tests, extension, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
