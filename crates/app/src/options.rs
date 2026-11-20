@@ -2524,7 +2524,7 @@ impl OptionsDialog {
             ui,
             &p,
             o.x + 30.0,
-            o.y + 264.0,
+            o.y + 250.0,
             &rar,
             ink,
             o.x + 400.0,
@@ -2533,7 +2533,7 @@ impl OptionsDialog {
         let has_hatchzip = self.hatch_zip.is_some();
         winui::checkbox_light(
             ui,
-            o + vec2(30.0, 284.0),
+            o + vec2(30.0, 268.0),
             &mut s.extract_in_place,
             if has_hatchzip {
                 // i18n: Options → Archives check box: HatchZip (a program's name) removes the archive while extracting it, so only the extracted files need disk space
@@ -2544,6 +2544,38 @@ impl OptionsDialog {
             },
             has_hatchzip,
         );
+        // The passwords tried on an encrypted archive before it is asked (#37; upstream's button,
+        // kept here between the in-place check box and "Extract to").
+        let (pw_x, pw_w) = winui::button_row_from_left(
+            &p,
+            &[("Archive passwords...", 30.0, 150.0)],
+            0.0,
+            389.0,
+            300.0,
+        )[0];
+        // i18n: Options → Archives: button: edit the list of passwords tried on encrypted archives
+        if winui::button_light(
+            ui,
+            r(o, pw_x, 291.0, pw_w, 21.0),
+            "Archive passwords...",
+            ButtonKind::Normal,
+            false,
+        )
+        .clicked()
+        {
+            self.sub = Some(Sub::Passwords(s.archive_passwords.clone()));
+        }
+        let saved = s.archive_password_list().len() as u64;
+        if saved > 0 {
+            text(
+                &p,
+                o.x + pw_x + pw_w + 10.0,
+                o.y + 307.0,
+                // i18n: Options → Archives: beside the Archive passwords button: how many are saved
+                &crate::i18n::tn(saved, "{n} saved", "{n} saved"),
+                LIGHT_DISABLED(),
+            );
+        }
         // i18n: Options → Archives check box (JDownloader's "Extract to"): the folder below replaces the archive's own
         let to_tip = if s.extract_in_place {
             // i18n: Options → Archives, tooltip: extracting in place with HatchZip (a program's name) cannot go elsewhere

@@ -785,6 +785,11 @@
 	Choose a .torrent file	Choose a .torrent file
 #. text in langpick.rs
 	Choose a language	Choose a language
+#. text in a dialog box; text in the Options window; text in a download's Properties window
+#. Download File Info: the title of the window, and the tooltip of the button, that pick the folder to extract to
+#. Options → Archives: the title of the window, and the tooltip of the button, that pick the folder to extract to
+#. File Properties: the title of the window, and the tooltip of the button, that pick the folder to extract to
+	Choose the folder to extract to	Choose the folder to extract to
 #. text in langpick.rs
 	Choose the language Mister Download Manager shows its windows in:	Choose the language Mister Download Manager shows its windows in:
 #. text in the Options window
@@ -1354,9 +1359,16 @@
 #. text in the Options window
 #. Options → Archives check box: HatchZip (a program's name) removes the archive while extracting it, so only the extracted files need disk space
 	Extract in place with HatchZip: only the files need room	Extract in place with HatchZip: only the files need room
-#. text in the Link grabber window
+#. checkbox in the Options window
+	Extract to this folder instead of the archive's:	Extract to this folder instead of the archive's:
+#. text in a dialog box; text in the Link grabber window; text in a download's Properties window
+#. Download File Info: a check box, ticked to extract the archive when it has downloaded
 #. Link grabber check box: extract the package's archives once they are downloaded
+#. File Properties: a check box, ticked to extract the archive when it has downloaded
 	Extract when done	Extract when done
+#. text in the Options window
+#. Options → Archives, tooltip: extracting in place with HatchZip (a program's name) cannot go elsewhere
+	Extracting in place always uses the archive's folder.	Extracting in place always uses the archive's folder.
 #. text in extracting archives (a download's log, the Archive password window)
 #. the trailing ... means it is still going on: keep it
 	Extracting the archive...	Extracting the archive...
@@ -4427,6 +4439,9 @@
 	When	When
 #. text in the Options window
 	When it is off, downloads go on in the main window's list. Double-click one there to see its progress.	When it is off, downloads go on in the main window's list. Double-click one there to see its progress.
+#. text in the Options window
+#. Options → Archives, tooltip of the "Extract to" check box
+	Where the files go: this folder instead of the one the archive is in.	Where the files go: this folder instead of the one the archive is in.
 #. text in the Batch download window
 	Wildcard size	Wildcard size
 #. text in the Scheduler window
@@ -5526,6 +5541,9 @@ menu	Emerald	Emerald
 #. menu command in the main window
 #. verb: unpack the downloaded archive (zip, 7z, rar) into its folder
 menu	Extract	Extract
+#. menu command in the main window
+#. check item: unpack the archive into its folder when it has downloaded
+menu	Extract when done	Extract when done
 #. menu command in the main window
 #. right-click → Torrent submenu: open the selected torrent's file list
 #. the trailing ... means it opens a window: keep it
