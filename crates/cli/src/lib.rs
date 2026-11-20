@@ -3,7 +3,7 @@
 //! `misterdownloadmanager --cli <arguments>`, and the app's `main` hands those to [`main`].
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use mdm_engine::download::{ConnStatus, MAX_CONNECTIONS_UNLOCKED, State};
 use mdm_engine::{Destination, Download, Options, Proxy, Request};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{COOKIE, HeaderMap, HeaderName, HeaderValue, REFERER, USER_AGENT};
 use serde_json::json;
 
 #[derive(Parser)]
@@ -48,6 +48,16 @@ enum Cmd {
         /// Extra request header, e.g. "Referer: https://example.com/" (repeatable).
         #[arg(short = 'H', long = "header")]
         headers: Vec<String>,
+        /// The page's address (Referer header), for links that need one or an expired link's renewal.
+        #[arg(short = 'r', long = "referer", alias = "referrer")]
+        referer: Option<String>,
+        /// The User-Agent header to send with download requests.
+        #[arg(long = "user-agent", alias = "ua")]
+        user_agent: Option<String>,
+        /// The Cookie header to send with download requests. A cookie on the command line ends
+        /// up in the shell's history; "-" reads it from standard input instead.
+        #[arg(long = "cookie", alias = "cookies")]
+        cookie: Option<String>,
         /// The finished file must have this hash: hex MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32,
         /// optionally named ("sha256:…").
         #[arg(long, value_parser = parse_checksum)]
@@ -70,7 +80,27 @@ enum Cmd {
         direct: bool,
     },
     /// The running app's downloads, as JSON (automation API; turn it on with `api on`).
-    Status,
+    #[command(alias = "list")]
+    Status {
+        /// Only the download with this id.
+        #[arg(long)]
+        id: Option<u64>,
+        /// Only downloads with this status: Queued, Downloading, Stopped, Complete or Error.
+        #[arg(short = 's', long)]
+        status: Option<String>,
+        /// Only downloads whose file name or address contains this text (any case).
+        #[arg(long)]
+        search: Option<String>,
+        /// A category for the download (e.g. "Compressed", "Documents", "Music", "Programs", "Video").
+        #[arg(short = 'c', long)]
+        category: Option<String>,
+        /// The queue to list (by name; e.g. "Main download queue").
+        #[arg(short = 'q', long)]
+        queue: Option<String>,
+        /// At most this many, newest first.
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+    },
     /// Install (or update) yt-dlp for video downloads: its checksum list is verified against
     /// yt-dlp's signing key, the program against that list.
     InstallYtdlp,
@@ -81,6 +111,10 @@ enum Cmd {
     /// Install (or update) gallery-dl for image galleries: its checksum list is verified against
     /// its author's signing key, the program against that list (Windows and Linux x86-64).
     InstallGalleryDl,
+    /// Install (or update) Deno, the JavaScript runtime yt-dlp needs for YouTube's qualities:
+    /// Deno's official build, checked against its release's SHA-256 (64-bit Windows, Linux and
+    /// macOS). yt-dlp is told of it from then on.
+    InstallDeno,
     /// Download an image gallery's files with gallery-dl (needs `install-gallery-dl`).
     GalleryGet {
         /// The gallery's address (a Wikimedia Commons category, a Flickr album, ...).
@@ -115,8 +149,10 @@ enum Cmd {
         format: Option<String>,
         /// The video's height ("1080", "720p"): the best of that height, else of the nearest
         /// below it the page offers (else the nearest above), as `video-info` lists them.
-        #[arg(short, long, value_parser = parse_height)]
-        quality: Option<u32>,
+        /// "compatible": the most compatible, as the Download video window's "Most compatible
+        /// (H.264 + AAC)": the best H.264 picture with AAC sound, in an MP4 (never converted).
+        #[arg(short, long, value_parser = parse_quality)]
+        quality: Option<Quality>,
         /// Folder to save into.
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
@@ -244,12 +280,29 @@ enum Cmd {
         /// The queue to add to (by name; adds to the main queue with `--later` if omitted).
         #[arg(short = 'q', long = "queue")]
         queue: Option<String>,
+        /// The finished file must have this hash: hex MD5 / SHA-1 / SHA-256 / SHA-512 / CRC32,
+        /// optionally named ("sha256:…").
+        #[arg(long)]
+        checksum: Option<String>,
+        /// The page's address (Referer header), for links that need one or an expired link's renewal.
+        #[arg(short = 'r', long = "referer", alias = "referrer")]
+        referer: Option<String>,
+        /// The User-Agent header to send with download requests.
+        #[arg(long = "user-agent", alias = "ua")]
+        user_agent: Option<String>,
+        /// The Cookie header to send with download requests. A cookie on the command line ends
+        /// up in the shell's history; "-" reads it from standard input instead.
+        #[arg(long = "cookie", alias = "cookies")]
+        cookie: Option<String>,
         /// Add to the queue without starting it now.
         #[arg(short = 'l', long = "later")]
         later: bool,
         /// Silent: do not show the Download File Info dialog in the app.
         #[arg(short = 's', long = "silent")]
         silent: bool,
+        /// Private: do not save the download to the app's history or saved list.
+        #[arg(short = 'p', long = "private")]
+        private: bool,
     },
     /// Start a download queue in the running app (automation API). Starts the main queue by default.
     StartQueue {
@@ -289,6 +342,16 @@ enum Cmd {
         /// Extra request header, e.g. "Cookie: id=1" (repeatable).
         #[arg(short = 'H', long = "header")]
         headers: Vec<String>,
+        /// The page's address (Referer header), for links that need one or an expired link's renewal.
+        #[arg(short = 'r', long = "referer", alias = "referrer")]
+        referer: Option<String>,
+        /// The User-Agent header to send with download requests.
+        #[arg(long = "user-agent", alias = "ua")]
+        user_agent: Option<String>,
+        /// The Cookie header to send with download requests. A cookie on the command line ends
+        /// up in the shell's history; "-" reads it from standard input instead.
+        #[arg(long = "cookie", alias = "cookies")]
+        cookie: Option<String>,
         /// Continue from the address itself, never through a debrid account (see `get`).
         #[arg(long)]
         direct: bool,
@@ -376,35 +439,149 @@ fn ask(cmd: mdm_ipc::Command) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn status_command(
+    id: Option<u64>,
+    status: Option<String>,
+    search: Option<String>,
+    category: Option<String>,
+    queue: Option<String>,
+    limit: Option<usize>,
+) -> anyhow::Result<()> {
+    let answer = mdm_ipc::request(&mdm_ipc::Command {
+        query: Some("list".into()),
+        ..Default::default()
+    })
+    .map_err(|e| anyhow::anyhow!("Mister Download Manager isn't running ({e})"))?;
+
+    if serde_json::from_str::<mdm_ipc::api::ErrorAnswer>(&answer).is_ok() {
+        println!("{answer}");
+        return Err(Reported.into());
+    }
+
+    if id.is_none()
+        && status.is_none()
+        && search.is_none()
+        && category.is_none()
+        && queue.is_none()
+        && limit.is_none()
+    {
+        println!("{answer}");
+        return Ok(());
+    }
+
+    let list: mdm_ipc::api::ListAnswer =
+        serde_json::from_str(&answer).map_err(|e| anyhow::anyhow!("unreadable answer: {e}"))?;
+
+    let filter = mdm_ipc::api::ListFilter {
+        id,
+        status: status.as_deref(),
+        search: search.as_deref(),
+        category: category.as_deref(),
+        queue: queue.as_deref(),
+        limit,
+    };
+
+    let filtered = list.filtered(&filter).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let output = serde_json::to_string(&filtered)?;
+    println!("{output}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn add_command(
     url: String,
     output: Option<PathBuf>,
     name: Option<String>,
     category: Option<String>,
     queue: Option<String>,
+    checksum: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    cookie: Option<String>,
     later: bool,
     silent: bool,
-) -> mdm_ipc::Command {
+    private: bool,
+) -> anyhow::Result<mdm_ipc::Command> {
+    add_command_with(
+        url,
+        output,
+        name,
+        category,
+        queue,
+        checksum,
+        referer,
+        user_agent,
+        cookie,
+        later,
+        silent,
+        private,
+        std::io::stdin(),
+    )
+}
+
+fn read_cookie(cookie: Option<String>, mut stdin: impl Read) -> anyhow::Result<Option<String>> {
+    match cookie.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            stdin
+                .read_to_string(&mut buf)
+                .context("reading cookie from standard input")?;
+            let trimmed = buf.trim().to_string();
+            Ok((!trimmed.is_empty()).then_some(trimmed))
+        }
+        _ => Ok(cookie),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_command_with(
+    url: String,
+    output: Option<PathBuf>,
+    name: Option<String>,
+    category: Option<String>,
+    queue: Option<String>,
+    checksum: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    cookie: Option<String>,
+    later: bool,
+    silent: bool,
+    private: bool,
+    stdin: impl Read,
+) -> anyhow::Result<mdm_ipc::Command> {
     let dir = output.map(|p| {
         std::path::absolute(&p)
             .unwrap_or(p)
             .to_string_lossy()
             .to_string()
     });
-    mdm_ipc::Command {
+    let cookies = read_cookie(cookie, stdin)?;
+    Ok(mdm_ipc::Command {
         url: Some(url),
         dir,
         name,
         category,
         queue,
+        checksum,
+        referer,
+        user_agent,
+        cookies,
         later,
         silent,
+        private,
         ..Default::default()
-    }
+    })
 }
 
-/// `pair`: a new pairing code from the running app, printed for a person.
-fn pair() -> anyhow::Result<()> {
+/// `pair`: a new pairing code from the running app, printed for a person (or raw JSON with `--json`).
+fn pair(json: bool) -> anyhow::Result<()> {
+    if json {
+        return ask(mdm_ipc::Command {
+            pair: true,
+            ..Default::default()
+        });
+    }
     let answer = mdm_ipc::request(&mdm_ipc::Command {
         pair: true,
         ..Default::default()
@@ -519,6 +696,10 @@ pub fn main_with(args: Vec<OsString>, accounts: Option<&dyn Accounts>) -> ExitCo
     let cli = Cli::parse_from(std::iter::once(OsString::from(NAME)).chain(args));
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let json = cli.json;
+    #[cfg(unix)]
+    if runs_helpers(&cli.cmd) {
+        end_helpers_when_stopped(&rt, json);
+    }
     match rt.block_on(run(cli.cmd, json, accounts)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.is::<Reported>() => ExitCode::FAILURE,
@@ -536,6 +717,57 @@ pub fn main_with(args: Vec<OsString>, accounts: Option<&dyn Accounts>) -> ExitCo
     }
 }
 
+/// Whether `cmd` runs yt-dlp or gallery-dl (a look-up, a download, an install's version check).
+/// On Linux and macOS each runs in a process group of its own (#1301), which the terminal's
+/// Ctrl+C doesn't reach: such a command ends them itself when stopped
+/// ([`end_helpers_when_stopped`]). Windows: their job objects end them with this process.
+#[cfg(unix)]
+fn runs_helpers(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::InstallYtdlp
+            | Cmd::InstallFfmpeg
+            | Cmd::InstallGalleryDl
+            | Cmd::InstallDeno
+            | Cmd::GalleryGet { .. }
+            | Cmd::VideoInfo { .. }
+            | Cmd::PlaylistInfo { .. }
+            | Cmd::PlaylistGet { .. }
+            | Cmd::VideoGet { .. }
+    )
+}
+
+/// Linux, macOS: once the command is asked to stop (Ctrl+C, SIGTERM, its terminal closed), the
+/// helpers it runs end with all they started, what they downloaded left as a pause leaves it,
+/// and the command ends (128 + the signal's number). Heard from the start, on the runtime's
+/// other threads: a look-up runs on the command's own thread until yt-dlp answers.
+#[cfg(unix)]
+fn end_helpers_when_stopped(rt: &tokio::runtime::Runtime, json: bool) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let _in = rt.enter();
+    let (Ok(mut int), Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return;
+    };
+    rt.spawn(async move {
+        let number: i32 = tokio::select! {
+            _ = int.recv() => 2,
+            _ = term.recv() => 15,
+            _ = hup.recv() => 1,
+        };
+        mdm_tools::proc::end_all();
+        if json {
+            emit(json!({ "event": "stopped" }));
+        } else {
+            eprintln!("\nstopped");
+        }
+        std::process::exit(128 + number);
+    });
+}
+
 async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::Result<()> {
     match cmd {
         Cmd::Get {
@@ -543,6 +775,9 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             output,
             connections,
             headers,
+            referer,
+            user_agent,
+            cookie,
             checksum,
             dns,
             adapter,
@@ -553,7 +788,7 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             } else {
                 Destination::File(output)
             };
-            let headers = parse_headers(&headers)?;
+            let headers = build_headers(&headers, referer, user_agent, cookie)?;
             let opts = Options {
                 checksum,
                 dns,
@@ -590,6 +825,21 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             } else {
                 println!(
                     "ffmpeg {} verified and installed: {}",
+                    i.version,
+                    i.exe.display()
+                );
+            }
+            Ok(())
+        }
+        Cmd::InstallDeno => {
+            let dir = mdm_tools::tools_dir().ok_or_else(|| anyhow::anyhow!("no data folder"))?;
+            let i =
+                mdm_tools::deno::install_latest(&dir, &mdm_tools::net(Proxy::System), None).await?;
+            if json {
+                emit(json!({ "tool": "deno", "version": i.version, "path": i.exe }));
+            } else {
+                println!(
+                    "Deno {} verified and installed: {}",
                     i.version,
                     i.exe.display()
                 );
@@ -1195,10 +1445,14 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
                 }
             }
         }
-        Cmd::Status => ask(mdm_ipc::Command {
-            query: Some("list".into()),
-            ..Default::default()
-        }),
+        Cmd::Status {
+            id,
+            status,
+            search,
+            category,
+            queue,
+            limit,
+        } => status_command(id, status, search, category, queue, limit),
         Cmd::Pause { ids } => act("pause", ids),
         Cmd::Start { ids } => act("start", ids),
         Cmd::Remove { ids } => act("remove", ids),
@@ -1209,11 +1463,17 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             name,
             category,
             queue,
+            checksum,
+            referer,
+            user_agent,
+            cookie,
             later,
             silent,
+            private,
         } => ask(add_command(
-            url, output, name, category, queue, later, silent,
-        )),
+            url, output, name, category, queue, checksum, referer, user_agent, cookie, later,
+            silent, private,
+        )?),
         Cmd::StartQueue { queue, name } => ask(mdm_ipc::Command {
             action: Some("start_queue".into()),
             queue: queue.or(name),
@@ -1224,7 +1484,7 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             queue: queue.or(name),
             ..Default::default()
         }),
-        Cmd::Pair => pair(),
+        Cmd::Pair => pair(json),
         Cmd::Api { state } => ask(mdm_ipc::Command {
             api: Some(state == "on"),
             ..Default::default()
@@ -1233,6 +1493,9 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
             state,
             connections,
             headers,
+            referer,
+            user_agent,
+            cookie,
             direct,
         } => {
             // Through the account its address goes through (#44): the link a service gave
@@ -1244,7 +1507,8 @@ async fn run(cmd: Cmd, json: bool, accounts: Option<&dyn Accounts>) -> anyhow::R
                 // Download::resume says what is wrong with it.
                 Err(_) => opts(connections),
             };
-            let dl = Download::resume(state, parse_headers(&headers)?, opts)?;
+            let headers = build_headers(&headers, referer, user_agent, cookie)?;
+            let dl = Download::resume(state, headers, opts)?;
             watch(dl, json).await
         }
     }
@@ -1311,7 +1575,28 @@ fn declared_note(d: &mdm_tools::declared::Declared) -> String {
     format!("the page declares its video: {}", d.address)
 }
 
-/// `video-get --quality`: a height, as "1080" or "1080p".
+/// `video-get --quality`: a height, or the most compatible quality (#1439).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quality {
+    Height(u32),
+    /// The window's "Most compatible (H.264 + AAC)".
+    Compatible,
+}
+
+/// `video-get --quality`: a height, as "1080" or "1080p", or "compatible" (#1439).
+fn parse_quality(s: &str) -> Result<Quality, String> {
+    if s.trim().eq_ignore_ascii_case("compatible") {
+        return Ok(Quality::Compatible);
+    }
+    parse_height(s).map(Quality::Height).map_err(|_| {
+        format!(
+            "{:?} is not a height (such as 1080 or 720p) or \"compatible\"",
+            s.trim()
+        )
+    })
+}
+
+/// A height, as "1080" or "1080p".
 fn parse_height(s: &str) -> Result<u32, String> {
     let s = s.trim();
     let digits = s.strip_suffix(['p', 'P']).unwrap_or(s);
@@ -1346,16 +1631,47 @@ fn choice_line(c: &mdm_tools::resolve::Choice) -> String {
 }
 
 /// `video-get` without `-f` (#1240): the quality Download video starts on, or the one of the
-/// height asked, else its nearest ([`mdm_tools::resolve::pick`]), said on stderr (a `quality`
-/// event with `--json`). Its selector; or, with nothing to download, what the page offers.
+/// height asked, else its nearest ([`mdm_tools::resolve::pick`]), or the most compatible one
+/// (#1439), said on stderr (a `quality` event with `--json`). Its selector; or, with nothing to
+/// download, what the page offers.
 fn pick_quality(
     v: &mdm_tools::resolve::Video,
     choices: &[mdm_tools::resolve::Choice],
-    height: Option<u32>,
+    quality: Option<Quality>,
     merge: bool,
     json: bool,
 ) -> anyhow::Result<String> {
-    use mdm_tools::resolve::{is_audio, needs_merging, pick};
+    use mdm_tools::resolve::{compatible_choice, is_audio, needs_merging, pick};
+    // Its own line in the list, or the best when that is the very download (#1439).
+    if quality == Some(Quality::Compatible) {
+        let Some(c) = compatible_choice(v, merge) else {
+            let why = if needs_merging(v) && !merge {
+                "no H.264 video with AAC sound to give without ffmpeg: its pictures come apart \
+                 from their sound, and joining them needs ffmpeg (install-ffmpeg)"
+            } else {
+                "no H.264 video with AAC sound on that page, the most compatible quality \
+                 (nothing is converted)"
+            };
+            anyhow::bail!(NoFormat::new(why.to_owned(), v, choices));
+        };
+        if json {
+            emit(json!({
+                "event": "quality",
+                "label": c.label,
+                "format": c.selector,
+                "height": c.height,
+                "asked": "compatible",
+                "nearest": false,
+            }));
+        } else {
+            eprintln!("downloading {}", c.label);
+        }
+        return Ok(c.selector);
+    }
+    let height = match quality {
+        Some(Quality::Height(h)) => Some(h),
+        _ => None,
+    };
     let apart = needs_merging(v) && !merge;
     let picked = pick(choices, height)
         // The sound alone for a video only when the page has no picture at all.
@@ -1466,7 +1782,7 @@ impl std::fmt::Display for NoFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str(&self.why)?;
         if !self.choices.is_empty() {
-            f.write_str("\nthe page offers (-f, or --quality with a height):")?;
+            f.write_str("\nthe page offers (-f, or --quality with a height or compatible):")?;
             for c in &self.choices {
                 write!(f, "\n{}", choice_line(c))?;
             }
@@ -1484,12 +1800,15 @@ impl std::fmt::Display for NoFormat {
 
 impl std::error::Error for NoFormat {}
 
-/// A download's options: the app's defaults (the default browser's User-Agent, #668, and MDM's
-/// former one once if a site refuses it, #372).
+/// A download's options: the app's defaults (the default browser's User-Agent, #668, MDM's
+/// former one once if a site refuses it, #372, and MDM's own name once if a site's bot check
+/// refuses the browser's and the browser-like connection too, #1422; a `--user-agent` or a
+/// `User-Agent` header given is the only one sent).
 fn opts(connections: u32) -> Options {
     Options {
         max_connections: connections,
         agent_fallback: Some(mdm_engine::agent::IE11_USER_AGENT.to_owned()),
+        own_agent: Some(mdm_engine::agent::OWN_USER_AGENT.to_owned()),
         ..Options::default()
     }
 }
@@ -1553,6 +1872,35 @@ fn parse_headers(raw: &[String]) -> anyhow::Result<HeaderMap> {
         );
     }
     Ok(headers)
+}
+
+fn build_headers(
+    headers: &[String],
+    referer: Option<String>,
+    user_agent: Option<String>,
+    cookie: Option<String>,
+) -> anyhow::Result<HeaderMap> {
+    build_headers_with(headers, referer, user_agent, cookie, std::io::stdin())
+}
+
+fn build_headers_with(
+    headers: &[String],
+    referer: Option<String>,
+    user_agent: Option<String>,
+    cookie: Option<String>,
+    stdin: impl Read,
+) -> anyhow::Result<HeaderMap> {
+    let mut map = parse_headers(headers)?;
+    if let Some(r) = referer.filter(|s| !s.trim().is_empty()) {
+        map.insert(REFERER, HeaderValue::try_from(r.trim())?);
+    }
+    if let Some(ua) = user_agent.filter(|s| !s.trim().is_empty()) {
+        map.insert(USER_AGENT, HeaderValue::try_from(ua.trim())?);
+    }
+    if let Some(c) = read_cookie(cookie, stdin)? {
+        map.insert(COOKIE, HeaderValue::try_from(c.trim())?);
+    }
+    Ok(map)
 }
 
 /// Print progress until the download ends; Ctrl+C pauses it (state is saved). `json`: one
@@ -1658,7 +2006,12 @@ fn mb(b: u64) -> String {
 /// A throwaway torrent session for the command line (its own state folder, nothing kept).
 async fn torrents() -> anyhow::Result<(mdm_torrent::Torrents, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
-    let t = mdm_torrent::Torrents::start(mdm_torrent::Config::new(dir.path().to_owned())).await?;
+    let t = mdm_torrent::Torrents::start(mdm_torrent::Config {
+        // Its own folder, nothing of the person's is there: the engine may open what it makes.
+        require_authorization: false,
+        ..mdm_torrent::Config::new(dir.path().to_owned())
+    })
+    .await?;
     Ok((t, dir))
 }
 
@@ -1688,11 +2041,16 @@ mod tests {
         assert!(matches!(
             cli.map(|c| c.cmd),
             Ok(Cmd::VideoGet {
-                quality: Some(720),
+                quality: Some(Quality::Height(720)),
                 format: None,
                 ..
             })
         ));
+        // #1439: the most compatible, by its name.
+        assert_eq!(parse_quality("compatible"), Ok(Quality::Compatible));
+        assert_eq!(parse_quality(" Compatible "), Ok(Quality::Compatible));
+        assert_eq!(parse_quality("1080p"), Ok(Quality::Height(1080)));
+        assert!(parse_quality("best").unwrap_err().contains("compatible"));
         // One or the other.
         assert!(Cli::try_parse_from([NAME, "video-get", "u", "-q", "720", "-f", "b"]).is_err());
     }
@@ -1711,11 +2069,11 @@ mod tests {
         let merged = mdm_tools::resolve::choices(&v, true);
         assert_eq!(
             pick_quality(&v, &merged, None, true, true).unwrap(),
-            "100022+30216/bv*[height=288]+ba/b[height=288]"
+            "100022+30216/bv*[height=288][vcodec^=av01]+ba/bv*[height=288]+ba/b[height=288]"
         );
         assert_eq!(
-            pick_quality(&v, &merged, Some(4320), true, true).unwrap(),
-            "100022+30216/bv*[height=288]+ba/b[height=288]"
+            pick_quality(&v, &merged, Some(Quality::Height(4320)), true, true).unwrap(),
+            "100022+30216/bv*[height=288][vcodec^=av01]+ba/bv*[height=288]+ba/b[height=288]"
         );
         let apart = mdm_tools::resolve::choices(&v, false);
         let e = pick_quality(&v, &apart, None, false, true).unwrap_err();
@@ -1732,6 +2090,27 @@ mod tests {
         let empty = mdm_tools::resolve::parse(br#"{"title": "T", "formats": []}"#).unwrap();
         let e = pick_quality(&empty, &[], None, true, true).unwrap_err();
         assert!(e.to_string().ends_with("the page lists no format"), "{e}");
+        // #1439: the most compatible: its H.264 picture (30016) with the AAC sound, not the AV1
+        // one the best is; a page without one says so, with what it offers.
+        let compatible = Some(Quality::Compatible);
+        assert_eq!(
+            pick_quality(&v, &merged, compatible, true, true).unwrap(),
+            "30016+30216/bv[vcodec^=avc][height<=288]+ba[acodec^=mp4a]\
+             /b[vcodec^=avc][acodec^=mp4a][height<=288]"
+        );
+        let e = pick_quality(&v, &apart, compatible, false, true).unwrap_err();
+        assert!(e.to_string().contains("needs ffmpeg"), "{e}");
+        let av1 = mdm_tools::resolve::parse(
+            br#"{"title": "A video", "formats": [
+            {"format_id": "251", "ext": "webm", "vcodec": "none", "acodec": "opus", "filesize": 1200000},
+            {"format_id": "399", "ext": "mp4", "height": 1080, "vcodec": "av01.0.08M.08", "acodec": "none", "filesize": 4890000}]}"#,
+        )
+        .unwrap();
+        let offered = mdm_tools::resolve::choices(&av1, true);
+        let e = pick_quality(&av1, &offered, compatible, true, true).unwrap_err();
+        let n = e.downcast_ref::<NoFormat>().expect("the formats said");
+        assert!(n.why.contains("no H.264 video with AAC sound"), "{}", n.why);
+        assert!(n.to_string().contains("1080p MP4 · AV1"), "{n}");
     }
 
     #[test]
@@ -1842,11 +2221,17 @@ mod tests {
                 name: None,
                 category: None,
                 queue: None,
+                checksum: None,
+                referer: None,
+                user_agent: None,
+                cookie: None,
                 later: false,
                 silent: false,
+                private: false,
             } if url == "https://example.test/a.zip"
         ));
 
+        let sha256 = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
         let cli = Cli::try_parse_from([
             NAME,
             "add",
@@ -1859,6 +2244,8 @@ mod tests {
             "Torrents",
             "-q",
             "Night",
+            "--checksum",
+            sha256,
             "-l",
             "-s",
         ])
@@ -1871,13 +2258,144 @@ mod tests {
                 name: Some(ref n),
                 category: Some(ref c),
                 queue: Some(ref q),
+                checksum: Some(ref h),
+                referer: None,
+                user_agent: None,
+                cookie: None,
                 later: true,
                 silent: true,
+                private: false,
             } if url == "magnet:?xt=urn:btih:abc"
                 && o == &PathBuf::from("D:\\Downloads")
                 && n == "my_torrent"
                 && c == "Torrents"
                 && q == "Night"
+                && h == sha256
+        ));
+
+        let cmd = match cli.cmd {
+            Cmd::Add {
+                url,
+                output,
+                name,
+                category,
+                queue,
+                checksum,
+                referer,
+                user_agent,
+                cookie,
+                later,
+                silent,
+                private,
+            } => add_command(
+                url, output, name, category, queue, checksum, referer, user_agent, cookie, later,
+                silent, private,
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(cmd.checksum.as_deref(), Some(sha256));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "-r",
+            "https://example.test/page.html",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                referer: Some(ref r),
+                ..
+            } if url == "https://example.test/file.zip" && r == "https://example.test/page.html"
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "--referrer",
+            "https://example.test/page.html",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                referer: Some(ref r),
+                ..
+            } if url == "https://example.test/file.zip" && r == "https://example.test/page.html"
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "--user-agent",
+            "CustomAgent/1.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                user_agent: Some(ref u),
+                ..
+            } if url == "https://example.test/file.zip" && u == "CustomAgent/1.0"
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "--ua",
+            "CustomAgent/1.0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                user_agent: Some(ref u),
+                ..
+            } if url == "https://example.test/file.zip" && u == "CustomAgent/1.0"
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "--cookie",
+            "session=abc123",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                cookie: Some(ref c),
+                ..
+            } if url == "https://example.test/file.zip" && c == "session=abc123"
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "add",
+            "https://example.test/file.zip",
+            "--cookies",
+            "session=abc123",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Add {
+                ref url,
+                cookie: Some(ref c),
+                ..
+            } if url == "https://example.test/file.zip" && c == "session=abc123"
         ));
     }
 
@@ -1894,10 +2412,257 @@ mod tests {
             None,
             None,
             None,
+            None,
+            Some("https://example.test/source".into()),
+            None,
+            None,
             false,
             false,
-        );
+            false,
+        )
+        .unwrap();
         assert_eq!(cmd.dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(cmd.referer.as_deref(), Some("https://example.test/source"));
+        assert_eq!(cmd.user_agent, None);
+        assert_eq!(cmd.cookies, None);
+        assert!(!cmd.private);
+    }
+
+    #[test]
+    fn add_command_reads_cookie_from_stdin() {
+        let cmd = add_command_with(
+            "https://example.test/a.zip".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("-".into()),
+            false,
+            false,
+            false,
+            std::io::Cursor::new("session=secret_token_123\r\n"),
+        )
+        .unwrap();
+        assert_eq!(cmd.cookies.as_deref(), Some("session=secret_token_123"));
+        // A script's add with cookies is not the browser's own hand-off.
+        assert!(!cmd.browser_handoff);
+        assert!(!cmd.private);
+
+        let empty = add_command_with(
+            "https://example.test/a.zip".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("-".into()),
+            false,
+            false,
+            false,
+            std::io::Cursor::new("   \r\n"),
+        )
+        .unwrap();
+        assert_eq!(empty.cookies, None);
+        assert!(!empty.private);
+    }
+
+    #[test]
+    fn add_command_parses_private() {
+        for flag in ["--private", "-p"] {
+            let cli =
+                Cli::try_parse_from([NAME, "add", "https://example.test/file.zip", flag]).unwrap();
+            assert!(matches!(
+                cli.cmd,
+                Cmd::Add {
+                    ref url,
+                    private: true,
+                    ..
+                } if url == "https://example.test/file.zip"
+            ));
+        }
+
+        let cmd = add_command(
+            "https://example.test/file.zip".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(cmd.private);
+    }
+
+    #[test]
+    fn get_and_resume_commands_parse_headers_options() {
+        let cli = Cli::try_parse_from([
+            NAME,
+            "get",
+            "https://example.test/a.zip",
+            "--referer",
+            "https://example.test/page.html",
+            "--user-agent",
+            "CustomAgent/1.0",
+            "--cookie",
+            "-",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Get {
+                ref referer,
+                ref user_agent,
+                ref cookie,
+                ..
+            } if referer.as_deref() == Some("https://example.test/page.html")
+                && user_agent.as_deref() == Some("CustomAgent/1.0")
+                && cookie.as_deref() == Some("-")
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "get",
+            "https://example.test/a.zip",
+            "-r",
+            "https://example.test/page.html",
+            "--ua",
+            "CustomAgent/1.0",
+            "--cookies",
+            "session=abc",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Get {
+                ref referer,
+                ref user_agent,
+                ref cookie,
+                ..
+            } if referer.as_deref() == Some("https://example.test/page.html")
+                && user_agent.as_deref() == Some("CustomAgent/1.0")
+                && cookie.as_deref() == Some("session=abc")
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "resume",
+            "test.mdm.json",
+            "-r",
+            "https://example.test/source",
+            "--user-agent",
+            "MyAgent/2.0",
+            "--cookie",
+            "-",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Resume {
+                ref referer,
+                ref user_agent,
+                ref cookie,
+                ..
+            } if referer.as_deref() == Some("https://example.test/source")
+                && user_agent.as_deref() == Some("MyAgent/2.0")
+                && cookie.as_deref() == Some("-")
+        ));
+    }
+
+    #[test]
+    fn build_headers_combines_options_and_stdin_cookie() {
+        let raw = vec!["X-Custom: custom-value".to_string()];
+        let headers = build_headers_with(
+            &raw,
+            Some("https://example.test/from".into()),
+            Some("Agent/1.0".into()),
+            Some("-".into()),
+            std::io::Cursor::new("session=abc123xyz\n"),
+        )
+        .unwrap();
+
+        assert_eq!(headers.get("x-custom").unwrap(), "custom-value");
+        assert_eq!(headers.get(REFERER).unwrap(), "https://example.test/from");
+        assert_eq!(headers.get(USER_AGENT).unwrap(), "Agent/1.0");
+        assert_eq!(headers.get(COOKIE).unwrap(), "session=abc123xyz");
+
+        let empty_stdin_headers = build_headers_with(
+            &[],
+            None,
+            None,
+            Some("-".into()),
+            std::io::Cursor::new("   \r\n"),
+        )
+        .unwrap();
+        assert_eq!(empty_stdin_headers.get(COOKIE), None);
+    }
+
+    #[test]
+    fn status_command_parses() {
+        let cli = Cli::try_parse_from([NAME, "status"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Status {
+                id: None,
+                status: None,
+                search: None,
+                category: None,
+                queue: None,
+                limit: None,
+            }
+        ));
+
+        let cli = Cli::try_parse_from([NAME, "list"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Status {
+                id: None,
+                status: None,
+                search: None,
+                category: None,
+                queue: None,
+                limit: None,
+            }
+        ));
+
+        let cli = Cli::try_parse_from([
+            NAME,
+            "status",
+            "--id",
+            "42",
+            "-s",
+            "Downloading",
+            "-c",
+            "Music",
+            "-q",
+            "Main download queue",
+            "--search",
+            "audio",
+            "-l",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Status {
+                id: Some(42),
+                status: Some(ref s),
+                category: Some(ref c),
+                queue: Some(ref q),
+                search: Some(ref search),
+                limit: Some(5),
+            } if s == "Downloading" && c == "Music" && q == "Main download queue" && search == "audio"
+        ));
     }
 
     /// A service that takes `hoster.test` only, or (`broken`) can't say which hosts it takes.
@@ -1970,6 +2735,18 @@ mod tests {
         assert_eq!(via(&host, false, None).await, None);
         let broken: &'static Fake = Box::leak(Box::new(Fake { broken: true }));
         assert_eq!(via(&host, false, Some(broken)).await, None);
+    }
+
+    #[test]
+    fn pair_command_parses() {
+        let cli = Cli::try_parse_from(["misterdownloadmanager-cli", "pair"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Pair));
+        assert!(!cli.json);
+
+        let cli_json =
+            Cli::try_parse_from(["misterdownloadmanager-cli", "--json", "pair"]).unwrap();
+        assert!(matches!(cli_json.cmd, Cmd::Pair));
+        assert!(cli_json.json);
     }
 
     fn args(a: &[&str]) -> Vec<OsString> {

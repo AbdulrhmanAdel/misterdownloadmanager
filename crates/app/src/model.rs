@@ -547,6 +547,21 @@ pub struct Item {
     /// often the site's address only. Refresh download address opens it; kept with the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+    /// It waits for a new address, as IDM's downloads do after Refresh download address: its last
+    /// run stopped because its address no longer gives the file (a signed link expired, 403, 404,
+    /// 410: the engine's `Error::wants_new_address`), or the user chose Refresh download address.
+    /// The browser's next download of the same file (`crate::freshlink`) gives it its address and
+    /// it goes on, instead of a new row starting over. Kept with the list (a link that expired
+    /// overnight is renewed the next day); cleared as it starts again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_address: bool,
+    /// It was made from a private (incognito) window's download. Saved (with Options → General →
+    /// "Keep private-window downloads in the list"), unlike `context.private`, which is memory
+    /// only: read back, the row stays apart from normal windows' downloads (it neither takes
+    /// nor gives a fresh address, `crate::freshlink`), never starts waiting by itself, and a
+    /// video never falls back to the normal browser's cookie store.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_window: bool,
     /// A video's (its `url` is the page): the address its file came from, the first stream of
     /// its last run as yt-dlp gave it to MDM's engine (#795). The windows' "Address".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -755,12 +770,17 @@ fn tool_snapshot(p: mdm_tools::video::Progress, url: &Url) -> mdm_engine::Snapsh
         V::Stopped => (State::Cancelled, None, None),
     };
     let size = p.total;
+    // A live stream yt-dlp records says no progress: what it has recorded is what's downloaded,
+    // so Downloaded and the rate (from its growth) follow the recording.
+    let downloaded = p.downloaded.max(p.recorded);
     // Downloaded by the helper itself (a live stream, RTMP; looking the page up): its one
-    // connection, not an empty list (#793).
+    // connection, not an empty list (#793); receiving once a live stream's recorder has opened
+    // its file (it is connected: `recording`, its file still 0 bytes until its first block) or
+    // its recording grows, though yt-dlp gives it no speed.
     let own = (p.engine.is_none() && state == State::Downloading).then(|| ConnView {
         id: 0,
-        downloaded: p.downloaded,
-        status: if p.speed > 0.0 {
+        downloaded,
+        status: if p.speed > 0.0 || p.recorded > 0 || p.recording {
             ConnStatus::Receiving
         } else {
             ConnStatus::Connecting
@@ -772,7 +792,7 @@ fn tool_snapshot(p: mdm_tools::video::Progress, url: &Url) -> mdm_engine::Snapsh
         size.map(|t| {
             vec![mdm_engine::download::SegmentView {
                 start: 0,
-                cursor: p.downloaded.min(t),
+                cursor: downloaded.min(t),
                 end: t,
             }]
         })
@@ -787,7 +807,7 @@ fn tool_snapshot(p: mdm_tools::video::Progress, url: &Url) -> mdm_engine::Snapsh
         url: engine.address.clone().unwrap_or_else(|| url.clone()),
         file,
         size,
-        downloaded: p.downloaded,
+        downloaded,
         resumable: Some(true),
         segments,
         connections: own.into_iter().chain(engine.connections).collect(),
@@ -830,6 +850,23 @@ impl Job {
             Job::Gallery { job, .. } => job.stop(),
             Job::Torrent(t) => t.cancel(),
             Job::Remote(r) => r.cancel(),
+        }
+    }
+
+    /// Stop and save: a live stream yt-dlp records is stopped and what it recorded kept
+    /// as a video, the download then done; anything else is cancelled as [`Job::cancel`] does.
+    pub fn save(&self) {
+        match self {
+            Job::Video { job, .. } => job.save(),
+            _ => self.cancel(),
+        }
+    }
+
+    /// A live stream's download: recording, being saved, or neither (`None`: every other job).
+    pub fn live_state(&self) -> Option<mdm_tools::video::LiveState> {
+        match self {
+            Job::Video { job, .. } => job.live_state(),
+            _ => None,
         }
     }
 
@@ -915,6 +952,11 @@ pub struct VideoSpec {
     /// title) is shortened instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named: bool,
+    /// The video's length (whole seconds) as its look-up said: the same video picked again on
+    /// its page is known by it when its stream's address is signed in its path for each load
+    /// (`same_video`). None in a list saved before it, for a live stream or a length not said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
 }
 
 /// A running download and its speed measurement.
@@ -1099,6 +1141,11 @@ fn size_after(
 }
 
 impl Item {
+    /// Made from a private window's download, in this session or one before it.
+    pub fn is_private_window(&self) -> bool {
+        self.private_window || self.context.private
+    }
+
     /// Add an app-side event (added, started, stopped …) to the log.
     pub fn note(&mut self, text: impl Into<String>) {
         let now = std::time::SystemTime::now()
@@ -1190,6 +1237,8 @@ impl Item {
             moved_away: false,
             referer: None,
             page: None,
+            waits_for_address: false,
+            private_window: false,
             file_url: None,
             live: None,
             torrent_check: None,
@@ -1235,6 +1284,11 @@ impl Item {
         let Some(live) = &mut self.live else {
             return false;
         };
+        // Before the snapshot, not after: a live stream recording or being saved as this is read
+        // can only show, in the snapshot taken next, more recorded, 0 (its run over, being
+        // saved) or its file's size (saved). Read after, a save begun or ended in between would
+        // show 0 for one look, unheld, and its file's size counted again by the download limit.
+        let live_now = live.dl.live_state();
         let s = live.dl.snapshot();
         // The service's id for a torrent sent to it (#44), kept to continue after a restart.
         if let (Job::Remote(r), Some(spec)) = (&live.dl, self.remote.as_mut())
@@ -1250,7 +1304,7 @@ impl Item {
             live.addressed = true;
             self.file_url = Some(s.url.clone());
         }
-        self.downloaded = s.downloaded;
+        self.downloaded = shown_downloaded(live_now, s.downloaded, self.downloaded);
         self.size = size_after(s.state, s.size, s.downloaded, self.size);
         self.resumable = s.resumable.or(self.resumable);
         if let Some(f) = &s.file {
@@ -1274,9 +1328,9 @@ impl Item {
         if self.torrent.is_none() && every_byte_in(&s) {
             // Every byte in (#736): nothing comes in while the last of it is written out, the
             // file checked, joined or named; the rate the download ended on isn't one any more.
-            live.speed.clear(Instant::now(), s.downloaded);
+            live.speed.clear(Instant::now(), self.downloaded);
         } else {
-            live.speed.read(Instant::now(), s.downloaded);
+            live.speed.read(Instant::now(), self.downloaded);
         }
         let seen = live.seen;
         for e in s.events.iter().filter(|e| e.seq > seen) {
@@ -1294,7 +1348,9 @@ impl Item {
             | State::Merging
             | State::Completing => None,
             State::Done => Some(Status::Complete),
-            State::Cancelled => Some(Status::Stopped),
+            // Stopped, its last bytes and state still being written (#1328): stopped for the
+            // list now; a start at its place waits for them in the engine.
+            State::Stopping | State::Cancelled => Some(Status::Stopped),
             State::Failed => Some(Status::Error),
         };
         match ended {
@@ -1309,8 +1365,29 @@ impl Item {
                         .map_or_else(|| "no reason given".to_owned(), |r| without_queries(&r))
                 });
                 self.status = status;
+                // A file's address that no longer gives it (expired, refused): it waits for a
+                // fresh one, which the browser's next download of the file gives it.
+                if failed_now
+                    && self.video.is_none()
+                    && !self.is_private_window()
+                    && crate::freshlink::expiring_site(&self.url)
+                    && s.failure
+                        .as_ref()
+                        .is_some_and(mdm_engine::Error::wants_new_address)
+                {
+                    self.waits_for_address = true;
+                }
                 // In the interface language; the engine's English when it gave no failure.
                 self.error = s.failure.as_ref().map(crate::errors::describe).or(s.error);
+                if self.video.is_some()
+                    && self.is_private_window()
+                    && let Some(error) = self
+                        .error
+                        .as_ref()
+                        .and_then(|e| crate::videodlg::private_auth_error(e))
+                {
+                    self.error = Some(error);
+                }
                 // Why it failed, in the log too, once (#1262: 0.5.2's log said nothing of a
                 // video yt-dlp couldn't download, only the progress window did). The site's
                 // name, not its address: a log is attached to reports, and addresses carry
@@ -1409,6 +1486,18 @@ impl Item {
             })
     }
 
+    /// It failed because the server's answer was no larger than a web page where the browser's
+    /// file was larger than any (#1460): the progress window explains it in full under "Error",
+    /// as a site's page. As its last run ended (this session only).
+    pub fn got_other_answer(&self) -> bool {
+        self.status == Status::Error
+            && self.live.is_none()
+            && self.snap.as_ref().is_some_and(|s| {
+                s.state == State::Failed
+                    && matches!(s.failure, Some(mdm_engine::Error::NotTheFile { .. }))
+            })
+    }
+
     /// Its last run failed joining a video's streams and kept them for Resume
     /// ([`VideoSpec::parts`]): the progress window explains it in full under "Error", as a
     /// site's page (#701).
@@ -1432,16 +1521,20 @@ impl Item {
     /// The web page it was obtained from (#795): a video's or a gallery's is its own address
     /// (the page yt-dlp, gallery-dl look up); a file's the page the browser started it from
     /// (#607), else the one it sent as its referer (an older extension's, Import's, File
-    /// Properties'). Refresh download address opens it.
+    /// Properties'). Refresh download address opens it. A site's address alone (a Referer a
+    /// referrer policy cut, `https://host/`) only when none of them names a page on it.
     pub fn web_page(&self) -> Option<&str> {
         if self.video.is_some() || self.gallery.is_some() {
             return Some(self.url.as_str());
         }
-        self.page
-            .as_deref()
-            .or(self.context.referer.as_deref())
-            .or(self.referer.as_deref())
-            .filter(|r| !r.is_empty())
+        let known = [
+            self.page.as_deref(),
+            self.context.referer.as_deref(),
+            self.referer.as_deref(),
+        ];
+        let mut known = known.into_iter().flatten().filter(|r| !r.is_empty());
+        let first = known.clone().next()?;
+        Some(known.find(|r| !site_only(r)).unwrap_or(first))
     }
 
     /// The referer sent with it from now on (the browser's, File Properties'): the request's
@@ -1461,6 +1554,12 @@ impl Item {
             }) => job.helper(),
             _ => None,
         }
+    }
+
+    /// A running live stream's download: recording, or its recording being saved
+    /// ([`Job::live_state`]); `None` when nothing runs.
+    pub fn live_state(&self) -> Option<mdm_tools::video::LiveState> {
+        self.live.as_ref().and_then(|l| l.dl.live_state())
     }
 
     /// Resume / Download Now may start it: not running, and not finished (a gallery finished
@@ -1634,6 +1733,22 @@ impl Item {
     pub fn time_left(&self) -> String {
         self.seconds_left().map_or(String::new(), time)
     }
+}
+
+/// A web address that is a site's only (`https://host/`, no path, query or fragment): what a
+/// referrer policy leaves of the page a download was started from ([`Item::web_page`]).
+fn site_only(address: &str) -> bool {
+    Url::parse(address)
+        .is_ok_and(|u| u.path() == "/" && u.query().is_none() && u.fragment().is_none())
+}
+
+/// What a running download shows as downloaded: `now`, its job's; a live stream recording or
+/// being saved (`live`, read before `now`) never less than `shown`. Its recording being saved, its
+/// run is over and what it recorded no longer counts in its progress (0 until its file is
+/// there): what it got stays, for the window and for the download limit, which counts only what
+/// is more than before (`Quota::record`) and would count the recording again as it came back.
+fn shown_downloaded(live: Option<mdm_tools::video::LiveState>, now: u64, shown: u64) -> u64 {
+    if live.is_some() { now.max(shown) } else { now }
 }
 
 /// Every byte of a download is in (#736): the last of it is written out (its whole size
@@ -1962,6 +2077,7 @@ mod file_address_tests {
             subs: Default::default(),
             parts: Vec::new(),
             named: false,
+            duration: None,
         });
         i
     }
@@ -1982,6 +2098,8 @@ mod file_address_tests {
             helper: None,
             merging: None,
             merge_failed: None,
+            recorded: 0,
+            recording: false,
         };
         // Looking the page up: no stream yet.
         assert_eq!(tool_snapshot(p.clone(), &page).url, page);
@@ -2021,6 +2139,17 @@ mod file_address_tests {
         f.set_referer(Some("https://www.example.com/".into()));
         f.page = Some("https://www.example.com/files/a.html".into());
         assert_eq!(f.web_page(), Some("https://www.example.com/files/a.html"));
+        // A site's address alone is the page only when nothing names one on it: a page the
+        // browser gave as only the site's (a tab gone to the home page) gives way to a Referer
+        // that is a whole page; a Referer cut to the site, with no page, is still shown.
+        f.page = Some("https://www.example.com/".into());
+        f.set_referer(Some("https://www.example.com/files/a.html".into()));
+        assert_eq!(f.web_page(), Some("https://www.example.com/files/a.html"));
+        f.page = None;
+        f.set_referer(Some("https://www.example.com/".into()));
+        assert_eq!(f.web_page(), Some("https://www.example.com/"));
+        f.page = Some(String::new());
+        assert_eq!(f.web_page(), Some("https://www.example.com/"));
     }
 
     /// The referer and a video's file address are kept with the list (#795); the browser's
@@ -2168,6 +2297,7 @@ mod tests {
             subs: Default::default(),
             parts: Vec::new(),
             named: false,
+            duration: None,
         });
         it
     }
@@ -2416,7 +2546,84 @@ mod helper_connection_tests {
             helper: None,
             merging: None,
             merge_failed: None,
+            recorded: 0,
+            recording: false,
         }
+    }
+
+    /// A live stream yt-dlp records says no progress: what it has recorded is what's downloaded
+    /// (Downloaded, and the rate from its growth); a progress of its own counts when larger.
+    #[test]
+    fn a_recording_counts_as_downloaded() {
+        let page: Url = "https://www.example.com/live".parse().unwrap();
+        let mut p = progress();
+        p.helper = Some(mdm_tools::streams::Helper::Live);
+        p.recorded = 3 << 20;
+        let s = tool_snapshot(p.clone(), &page);
+        assert_eq!(s.downloaded, 3 << 20);
+        assert_eq!(s.connections[0].downloaded, 3 << 20);
+        assert!(matches!(s.connections[0].status, ConnStatus::Receiving));
+        p.downloaded = 4 << 20;
+        assert_eq!(tool_snapshot(p.clone(), &page).downloaded, 4 << 20);
+        p.recorded = 0;
+        p.downloaded = 0;
+        assert_eq!(tool_snapshot(p, &page).downloaded, 0);
+    }
+
+    /// A live stream whose recorder has opened its file is receiving, though nothing is written
+    /// yet (the file stays 0 bytes until its first block): not "Connecting". Before that, it is
+    /// connecting.
+    #[test]
+    fn a_recorder_that_opened_its_file_is_receiving() {
+        let page: Url = "https://www.example.com/live".parse().unwrap();
+        let mut p = progress();
+        p.helper = Some(mdm_tools::streams::Helper::Live);
+        let s = tool_snapshot(p.clone(), &page);
+        assert!(matches!(s.connections[0].status, ConnStatus::Connecting));
+        p.recording = true;
+        let s = tool_snapshot(p, &page);
+        assert_eq!((s.downloaded, s.connections[0].downloaded), (0, 0));
+        assert!(matches!(s.connections[0].status, ConnStatus::Receiving));
+    }
+
+    /// A live stream recorded, stopped and saved: what it shows as downloaded never drops while
+    /// it is saved (its run over, its progress 0), and the download limit counts the recording
+    /// once, not again as its file comes. A live stream started anew shows its new recording.
+    #[test]
+    fn a_saved_recording_is_counted_once() {
+        use mdm_tools::video::LiveState::{Recording, Saving};
+        const M: u64 = 1 << 20;
+        // (live_state read before the snapshot, the snapshot's downloaded)
+        let looks = [
+            // Started: nothing recorded yet.
+            (None, 0),
+            (Some(Recording), 4 * M),
+            (Some(Recording), 10 * M),
+            // Stop and save: read as recording, its run over in the snapshot.
+            (Some(Recording), 0),
+            (Some(Saving), 0),
+            // Saved as the snapshot was taken: its file's size.
+            (Some(Saving), 10 * M - 1000),
+            (None, 10 * M - 1000),
+        ];
+        let start = std::time::Instant::now();
+        let mut quota = crate::quota::Quota::default();
+        let mut shown = 0;
+        for (n, (live, now)) in looks.into_iter().enumerate() {
+            let before = shown;
+            shown = shown_downloaded(live, now, shown);
+            if live.is_some() {
+                assert!(shown >= before, "look {n}: {shown} < {before}");
+            }
+            quota.record(start, std::iter::once((7, shown)));
+        }
+        assert_eq!(shown, 10 * M - 1000);
+        assert_eq!(
+            quota.used(start, std::time::Duration::from_secs(3600)),
+            10 * M
+        );
+        // Not a live stream, or one not recording (yet, again): its job's own figure.
+        assert_eq!(shown_downloaded(None, 0, 10 * M), 0);
     }
 
     /// #793: a video yt-dlp downloads itself shows its one connection, not an empty list; one

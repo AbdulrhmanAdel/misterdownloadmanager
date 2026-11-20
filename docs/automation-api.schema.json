@@ -371,6 +371,13 @@
             "null"
           ]
         },
+        "checksum": {
+          "description": "The checksum the finished file must have, as the command line takes it (`sha256:…`, a\nbare hex value, …): `mdm_engine::verify::Hash` reads it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cookie_jar": {
           "description": "From the browser: the same cookies, each with the domain, path and flags the browser\nkeeps for it, for yt-dlp's cookie file. yt-dlp may ask another host than the page's (a\nYouTube Music page is looked up on www.youtube.com), and a cookie of `.youtube.com` goes\nthere too. An older extension sends `cookies` only.",
           "items": {
@@ -413,6 +420,11 @@
             "string",
             "null"
           ]
+        },
+        "hidden": {
+          "default": false,
+          "description": "`/fromhost` (beyond IDM, #1333): started by the browser native messaging host:\nstarts hidden without marking an OS session login.",
+          "type": "boolean"
         },
         "ids": {
           "default": [],
@@ -520,7 +532,7 @@
         },
         "private": {
           "default": false,
-          "description": "From a private (incognito) window: the download is never written to the saved list.",
+          "description": "From a private (incognito) window: the download is not written to the saved list, unless\nthe app's Options → General → \"Keep private-window downloads in the list\" is on.",
           "type": "boolean"
         },
         "proxy": {
@@ -722,6 +734,10 @@
             "string",
             "null"
           ]
+        },
+        "compatible": {
+          "description": "The most compatible choice (#1439): an H.264 picture with AAC sound in an MP4, which\nevery video editor, TV and phone plays; the menu says so beside its height. False from\nan app older than the field.",
+          "type": "boolean"
         },
         "ext": {
           "default": "",

@@ -9,6 +9,114 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Inode and birth time: a freed inode is soon given to another file, so the inode alone can
+/// name a file the person saved later. The device is left out on purpose: its number depends on
+/// the order disks were plugged in and changes across a reboot or a replug, which would make
+/// MDM's own files look like strangers. A filesystem that keeps no birth time gives no
+/// identity, and such files are never deleted by MDM; a start asks before writing to them.
+pub fn torrent_file_identity(file: &std::fs::File) -> std::io::Result<[u64; 5]> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    let born = metadata
+        .created()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?;
+    if born.is_zero() {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    Ok([
+        0,
+        metadata.ino(),
+        0,
+        born.as_secs(),
+        u64::from(born.subsec_nanos()),
+    ])
+}
+
+/// The identity of the plain file or folder at `path` (the folders MDM made for a torrent are
+/// recorded too). Anything else there (a pipe, a device, a link) has none and is not opened:
+/// opening a FIFO with nobody writing to it waits for ever, and the torrent would stay busy
+/// until MDM was restarted.
+pub fn torrent_file_identity_at(path: &Path) -> std::io::Result<[u64; 5]> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let kind = std::fs::symlink_metadata(path)?.file_type();
+    if !kind.is_file() && !kind.is_dir() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    // Not through a link or a pipe that took the name since the check above.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let kind = file.metadata()?.file_type();
+    if !kind.is_file() && !kind.is_dir() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    torrent_file_identity(&file)
+}
+
+/// Open (or, with `create`, make with `create_new`) the file at `path` for the torrent engine
+/// without following a link at its end (`O_NOFOLLOW`), and without waiting on a pipe
+/// (`O_NONBLOCK`). What was opened must be a plain file.
+pub fn open_torrent_file(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    if create {
+        options.create_new(true);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
+}
+
+/// Where the opened object really is, links resolved: `/proc/self/fd` on Linux, `F_GETPATH` on
+/// macOS. A system that can't say gives `Unsupported`.
+#[allow(unsafe_code)]
+pub fn torrent_file_path(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStringExt};
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH fills the buffer, which is PATH_MAX bytes, with a NUL-ended path.
+        let r = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+        if r == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let end = buffer.iter().position(|b| *b == 0).unwrap_or(buffer.len());
+        buffer.truncate(end);
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(buffer)))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = file;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Delete `path` when it is still the object whose identity is `expected`. POSIX can't delete
+/// through a handle: the identity is checked, then the file is removed by name, so a rename in
+/// that gap by another program can still make this remove the wrong file. (Windows deletes
+/// through the verified handle.)
+pub fn remove_owned_torrent_file(path: &Path, expected: [u64; 5]) -> std::io::Result<bool> {
+    // Without following a link or waiting on a pipe: the identity read of the path does both.
+    if torrent_file_identity_at(path)? != expected {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
 /// The program to start again later: the AppImage file itself when running from one (its
 /// programs sit in a temporary mount), else this executable.
 pub fn program() -> Option<PathBuf> {
@@ -237,6 +345,8 @@ pub fn exit_now(code: i32) -> ! {
 /// MDM ends at once, the list and the downloads as last saved: the session's end, not a crash.
 #[cfg(target_os = "linux")]
 fn end_now() -> ! {
+    // yt-dlp and gallery-dl end with it (#1301).
+    mdm_tools::proc::end_all();
     crate::crash::clean_exit();
     std::process::exit(1);
 }
@@ -1746,7 +1856,8 @@ const WAYLAND_LIBS: &[WindowLib] = &[
 pub struct WindowSystem {
     /// Wayland's windows, not X11's (or XWayland's).
     pub wayland: bool,
-    /// X11 is chosen in a Wayland session (XWayland): winit is told so.
+    /// X11's windows in a Wayland session (XWayland): chosen there (winit is told so), or the only
+    /// display MDM was given, whose server is XWayland (`on_xwayland_server`).
     x11_over_wayland: bool,
     /// X11 was MDM's choice, but these are missing: Wayland's windows instead.
     pub x11_missing: Vec<&'static WindowLib>,
@@ -1866,6 +1977,32 @@ fn choose_window_system(
     ws
 }
 
+/// `ws`, an X11 session's, as XWayland's when its X server is XWayland (`xwayland`, asked only
+/// then): a program started without `WAYLAND_DISPLAY` in a Wayland session (Hyprland's apps
+/// started from an environment that lacks it) sees an X11 session only. Its windows are
+/// XWayland's all the same, and are paced as such (renderer.rs `Swaps::NoneWait`): taken for
+/// Xorg's, the main window's swaps waited for the screen's refresh, which XWayland gives a window
+/// the compositor isn't showing (on another workspace, in a special one) only by a timer about a
+/// second long; and every dialog is drawn in the main window's pass, so a click in Download File
+/// Info or Download complete showed its effect one to two seconds later.
+#[cfg(target_os = "linux")]
+fn on_xwayland_server(mut ws: WindowSystem, xwayland: impl FnOnce() -> bool) -> WindowSystem {
+    if !ws.wayland && !ws.x11_over_wayland && ws.missing.is_empty() && !ws.both && xwayland() {
+        ws.x11_over_wayland = true;
+        ws.why = "the session's only one, on XWayland: no Wayland display given";
+    }
+    ws
+}
+
+/// Whether the X server is XWayland: it has the XWAYLAND extension (XWayland 23.1 and later;
+/// an older one is taken for Xorg, as before).
+#[cfg(target_os = "linux")]
+fn xwayland_server() -> Result<bool, Box<dyn std::error::Error>> {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let (conn, _) = x11rb::rust_connection::RustConnection::connect(None)?;
+    Ok(conn.query_extension(b"XWAYLAND")?.reply()?.present)
+}
+
 /// View → Window system's saved choice, given before the first window opens.
 #[cfg(target_os = "linux")]
 static SAVED_PICK: std::sync::OnceLock<Option<crate::settings::WindowSystemPick>> =
@@ -1892,12 +2029,15 @@ pub fn window_system() -> &'static WindowSystem {
             std::env::var_os("MDM_WAYLAND").as_deref(),
             SAVED_PICK.get().copied().flatten(),
         );
-        let ws = choose_window_system(
-            set("WAYLAND_DISPLAY"),
-            set("DISPLAY"),
-            pick,
-            x11_fit,
-            |lib| lib.names.iter().any(|n| loads(n)),
+        let ws = on_xwayland_server(
+            choose_window_system(
+                set("WAYLAND_DISPLAY"),
+                set("DISPLAY"),
+                pick,
+                x11_fit,
+                |lib| lib.names.iter().any(|n| loads(n)),
+            ),
+            || xwayland_server().unwrap_or(false),
         );
         let system = match (ws.wayland, ws.x11_over_wayland) {
             (true, _) => "Wayland",
@@ -2119,6 +2259,82 @@ fn withdraw(window: u32) -> Result<(), Box<dyn std::error::Error>> {
     // A round trip: both requests reached the server before the connection closes.
     conn.get_input_focus()?.reply()?;
     Ok(())
+}
+
+/// Linux, XWayland only: a window of MDM's was clicked while it hasn't the keyboard (winit
+/// saw it lose the X input focus, or never get it), so the X server's input focus goes to it:
+/// to the window under the pointer, when it is MDM's and the focus is elsewhere. A window manager
+/// gives a clicked window the focus; Hyprland's (0.56) can leave the focus with another X11
+/// window than the one it shows active, and never sets it again since it takes that one for
+/// focused already: after another X11 program's window took the focus itself (Hyprland's revert
+/// then does nothing), or after MDM's main window was hidden in the notification area and shown
+/// again (the focus went with the window, and came back to none). Clicks kept working, keys went
+/// elsewhere: File Properties' boxes took the caret, but no typing and no Ctrl+V. Keys reach
+/// an X11 window only while the compositor gives XWayland the keyboard, so this never takes it
+/// from another program. Native Wayland: the compositor alone decides, nothing to do. Plain
+/// Xorg: the window manager's own focus rules stand (some keep the keyboard on a dialog while
+/// the main window behind it is clicked), nothing to do either.
+#[cfg(target_os = "linux")]
+pub fn take_keyboard_on_click() {
+    if !takes_keyboard_on_click(window_system()) || crate::offscreen() {
+        return;
+    }
+    match keyboard_to_window_under_pointer() {
+        Ok(Some(window)) => {
+            tracing::info!("a window clicked without the keyboard (X11): given it (0x{window:x})");
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("the clicked window couldn't be given the keyboard: {e}"),
+    }
+}
+
+/// Whether [`take_keyboard_on_click`] acts under `ws`: only in XWayland, X11 windows in a
+/// Wayland session (not native Wayland, not plain Xorg).
+#[cfg(target_os = "linux")]
+fn takes_keyboard_on_click(ws: &WindowSystem) -> bool {
+    ws.x11_over_wayland && !ws.wayland
+}
+
+/// [`take_keyboard_on_click`]'s work, on a connection of MDM's own: the X input focus to this
+/// process's window under the pointer, unless it has it. Some(window) when it was given.
+#[cfg(target_os = "linux")]
+fn keyboard_to_window_under_pointer() -> Result<Option<u32>, Box<dyn std::error::Error>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, InputFocus};
+    let (conn, screen) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let root = conn.setup().roots.get(screen).ok_or("no such screen")?.root;
+    let pid_atom = conn.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
+    // Down from the root to the program's window under the pointer: XWayland's root holds it,
+    // an X11 window manager's frame may (reparenting). The first with a process id is the one.
+    let mut window = root;
+    let mut ours = None;
+    for _ in 0..8 {
+        let child = conn.query_pointer(window)?.reply()?.child;
+        if child == x11rb::NONE {
+            break;
+        }
+        window = child;
+        let pid = conn
+            .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)?
+            .reply()?
+            .value32()
+            .and_then(|mut v| v.next());
+        if let Some(pid) = pid {
+            ours = (pid == std::process::id()).then_some(window);
+            break;
+        }
+    }
+    let Some(window) = ours else {
+        return Ok(None);
+    };
+    if conn.get_input_focus()?.reply()?.focus == window {
+        return Ok(None);
+    }
+    // The time of now: the click that asks for it has just happened.
+    conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)?;
+    // A round trip: the request reached the server before the connection closes.
+    conn.get_input_focus()?.reply()?;
+    Ok(Some(window))
 }
 
 /// Linux: the vendor OpenGL says it is (`GL_VENDOR`), with eframe's context current.
@@ -2942,13 +3158,191 @@ pub fn thread_usage(tid: u32) -> Option<crate::crash::Usage> {
     Some(crate::crash::Usage {
         cpu_ms: (utime + stime) * 1000 / hz,
         faults: Some(majflt),
+        pageins: None,
     })
 }
 
-/// macOS: not measured, since the window thread has no id there (`thread_id` is 0).
-#[cfg(not(target_os = "linux"))]
+/// The window thread's Mach port (macOS): the dump can't name the thread (`thread_id` is 0), so
+/// its use is asked of the kernel by this port instead ([`thread_usage`], #1515).
+#[cfg(target_os = "macos")]
+static WINDOW_THREAD: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+
+/// Remember the calling thread as the window thread (crash.rs, at start, on that thread). macOS
+/// only: elsewhere the thread's id ([`thread_id`]) is enough.
+#[cfg(target_os = "macos")]
+pub fn remember_window_thread() {
+    let _ = WINDOW_THREAD.set(this_thread_port());
+}
+
+/// The calling thread's Mach port. Not a new reference: the process's own name for the thread,
+/// valid as long as the thread lives (the window thread is the main thread: as long as MDM).
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn this_thread_port() -> libc::mach_port_t {
+    // SAFETY: plain queries about the calling thread.
+    unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) }
+}
+
+/// The window thread's processor time so far, with the whole of MDM's page faults and page-ins
+/// (pages read from disk) so far (crash.rs's freeze notes). `_tid` is 0 on macOS: the thread is
+/// the one [`remember_window_thread`] saw. None before that, or when the kernel doesn't answer.
+#[cfg(target_os = "macos")]
+pub fn thread_usage(_tid: u32) -> Option<crate::crash::Usage> {
+    port_usage(*WINDOW_THREAD.get()?)
+}
+
+/// Thread `port`'s use so far: `thread_info(THREAD_BASIC_INFO)` for its time, and the task's
+/// `task_info(TASK_EVENTS_INFO)` for the faults (those only when it answers).
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn port_usage(port: libc::mach_port_t) -> Option<crate::crash::Usage> {
+    // SAFETY: an all-integer C struct, filled by the kernel below.
+    let mut info: libc::thread_basic_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::THREAD_BASIC_INFO_COUNT;
+    // SAFETY: `info` is a thread_basic_info and `count` its size in integers, as thread_info asks;
+    // it writes no more than `count` integers.
+    let kr = unsafe {
+        libc::thread_info(
+            port,
+            libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+            (&raw mut info).cast(),
+            &mut count,
+        )
+    };
+    if kr != libc::KERN_SUCCESS {
+        return None;
+    }
+    Some(mach_usage(&info, task_events()))
+}
+
+/// The task's `task_events_info` (<mach/task_info.h>; the libc crate doesn't carry it).
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct TaskEventsInfo {
+    faults: libc::integer_t,
+    pageins: libc::integer_t,
+    cow_faults: libc::integer_t,
+    messages_sent: libc::integer_t,
+    messages_received: libc::integer_t,
+    syscalls_mach: libc::integer_t,
+    syscalls_unix: libc::integer_t,
+    csw: libc::integer_t,
+}
+
+/// <mach/task_info.h>'s TASK_EVENTS_INFO flavor.
+#[cfg(target_os = "macos")]
+const TASK_EVENTS_INFO: libc::task_flavor_t = 2;
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    /// MDM's own task port, which <mach/mach_init.h>'s `mach_task_self()` reads (libc's copy is
+    /// deprecated for the mach2 crate, which MDM doesn't otherwise need).
+    static mach_task_self_: libc::mach_port_t;
+}
+
+/// MDM's own page faults and page-ins so far.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn task_events() -> Option<TaskEventsInfo> {
+    let mut events = TaskEventsInfo::default();
+    let mut count = (size_of::<TaskEventsInfo>() / size_of::<libc::natural_t>())
+        as libc::mach_msg_type_number_t;
+    // SAFETY: `events` is a task_events_info and `count` its size in integers, as task_info asks;
+    // the task is MDM's own, its port set by the system before MDM runs.
+    let kr = unsafe {
+        libc::task_info(
+            mach_task_self_,
+            TASK_EVENTS_INFO,
+            (&raw mut events).cast(),
+            &mut count,
+        )
+    };
+    (kr == libc::KERN_SUCCESS).then_some(events)
+}
+
+/// A thread's basic info and the task's events as [`crate::crash::Usage`]: user + system time
+/// in ms, the task's faults and page-ins (the kernel's counters are 32-bit: read as unsigned).
+#[cfg(target_os = "macos")]
+fn mach_usage(
+    info: &libc::thread_basic_info,
+    events: Option<TaskEventsInfo>,
+) -> crate::crash::Usage {
+    let ms = |t: libc::time_value_t| {
+        t.seconds.max(0) as u64 * 1000 + t.microseconds.max(0) as u64 / 1000
+    };
+    crate::crash::Usage {
+        cpu_ms: ms(info.user_time) + ms(info.system_time),
+        faults: events.map(|e| e.faults as u32 as u64),
+        pageins: events.map(|e| e.pageins as u32 as u64),
+    }
+}
+
+/// Other systems: not measured.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn thread_usage(_tid: u32) -> Option<crate::crash::Usage> {
     None
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mach_usage_tests {
+    use super::*;
+
+    /// The kernel's answer as the freeze report reads it: user + system time in ms, the task's
+    /// faults and page-ins; a counter past 2^31 read as unsigned, not negative.
+    #[test]
+    #[allow(unsafe_code)]
+    fn a_threads_basic_info_is_its_time_in_ms() {
+        // SAFETY: an all-integer C struct.
+        let mut info: libc::thread_basic_info = unsafe { std::mem::zeroed() };
+        info.user_time = libc::time_value_t {
+            seconds: 2,
+            microseconds: 250_000,
+        };
+        info.system_time = libc::time_value_t {
+            seconds: 0,
+            microseconds: 40_999,
+        };
+        let events = TaskEventsInfo {
+            faults: 51_000,
+            pageins: -2,
+            ..Default::default()
+        };
+        let u = mach_usage(&info, Some(events));
+        assert_eq!(u.cpu_ms, 2_290);
+        assert_eq!(u.faults, Some(51_000));
+        assert_eq!(u.pageins, Some(u32::MAX as u64 - 1));
+        let u = mach_usage(&info, None);
+        assert_eq!((u.faults, u.pageins), (None, None));
+    }
+
+    /// The real kernel: a thread that runs gets its time counted (however busy the machine,
+    /// within a generous 20 s), one that sleeps doesn't.
+    #[test]
+    fn the_kernel_counts_a_running_thread() {
+        let port = this_thread_port();
+        let before = port_usage(port).expect("thread_info answers");
+        assert!(
+            before.faults.is_some() && before.pageins.is_some(),
+            "task_info answers"
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut n = 0u64;
+        while port_usage(port).unwrap().cpu_ms < before.cpu_ms + 200 {
+            assert!(
+                std::time::Instant::now() < until,
+                "200 ms of running never counted"
+            );
+            for _ in 0..100_000 {
+                n = std::hint::black_box(n.wrapping_add(1));
+            }
+        }
+        let before = port_usage(port).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let slept = port_usage(port).unwrap().cpu_ms - before.cpu_ms;
+        assert!(slept < 100, "ran {slept} ms of a 300 ms sleep");
+    }
 }
 
 /// While the window is hidden (#72): glibc hands the heap's free pages back to the system
@@ -3770,7 +4164,7 @@ mod tests {
 
     use super::{
         Pick, WindowLib, X11_LIBS, X11Fit, choose_window_system, desktop_looks_after_x11,
-        install_command, menu_window_type,
+        install_command, menu_window_type, on_xwayland_server,
     };
 
     /// #277: each menu's window says which menu it is, as GTK's and Qt's do.
@@ -3787,6 +4181,19 @@ mod tests {
         let b = super::menu_window(crate::window_builder(), MenuKind::Bar);
         assert_eq!(b.override_redirect, Some(true));
         assert_eq!(b.window_type, Some(X11WindowType::DropdownMenu));
+    }
+
+    /// PR #1360: a click gives the keyboard only in XWayland; plain Xorg keeps its window
+    /// manager's focus rules, native Wayland the compositor's.
+    #[test]
+    fn a_click_takes_the_keyboard_in_xwayland_only() {
+        use super::takes_keyboard_on_click as takes;
+        let ws = |wayland, x11| choose_window_system(wayland, x11, Pick::Auto, CARED, |_| true);
+        assert!(takes(&ws(true, true)), "XWayland");
+        assert!(!takes(&ws(false, true)), "plain Xorg");
+        assert!(!takes(&ws(true, false)), "native Wayland, the only system");
+        let wayland = choose_window_system(true, true, Pick::Wayland("test"), CARED, |_| true);
+        assert!(!takes(&wayland), "native Wayland chosen");
     }
 
     const X11_KEYBOARD: &str = "libxkbcommon-x11.so.0";
@@ -3875,6 +4282,30 @@ mod tests {
         assert!(!x11_session.wayland && !x11_session.both && !x11_session.x11_over_wayland);
         let wayland_only = choose_window_system(true, false, Pick::X11("saved"), || panic!(), ok);
         assert!(wayland_only.wayland && !wayland_only.both);
+    }
+
+    /// Started without WAYLAND_DISPLAY in a Wayland session, MDM sees an X11 session only: its
+    /// windows are XWayland's when the X server is (they swap without waiting there, so a dialog
+    /// answers a click at once while the main window is out of sight). The server is asked only
+    /// for an X11-only session MDM can open its windows in.
+    #[test]
+    fn an_x11_only_session_on_xwayland_is_xwaylands() {
+        let ok = |_: &WindowLib| true;
+        let x11_only = || choose_window_system(false, true, Pick::Auto, || panic!(), ok);
+        let on_xwayland = on_xwayland_server(x11_only(), || true);
+        assert!(!on_xwayland.wayland && on_xwayland.x11_over_wayland && !on_xwayland.both);
+        assert!(on_xwayland.why.contains("XWayland"), "{on_xwayland:?}");
+        let xorg = on_xwayland_server(x11_only(), || false);
+        assert_eq!(xorg, x11_only());
+        // A Wayland session's choice stands; the server isn't asked.
+        let asked = || -> bool { panic!("asked") };
+        let wayland = choose_window_system(true, true, Pick::Wayland("saved"), || panic!(), ok);
+        assert_eq!(on_xwayland_server(wayland, asked).why, "saved");
+        let x11 = choose_window_system(true, true, Pick::X11("saved"), || panic!(), ok);
+        assert!(on_xwayland_server(x11, asked).x11_over_wayland);
+        // X11's libraries missing: nothing opens on it, nothing to pace.
+        let missing = choose_window_system(false, true, Pick::Auto, || panic!(), |_| false);
+        assert!(!on_xwayland_server(missing, asked).x11_over_wayland);
     }
 
     /// The desktops that start a settings daemon for XWayland's programs, by

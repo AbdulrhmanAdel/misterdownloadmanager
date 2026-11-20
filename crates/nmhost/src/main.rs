@@ -705,6 +705,9 @@ fn menu_command(
                     title,
                     store_id: store(&l.store_id),
                 }),
+                // The page it was picked on (#607): a stream's address is often signed for each
+                // load of it, so the app knows the same video picked again by its page.
+                page_url: Some(l.page.clone()).filter(|p| p.len() <= PAGE_MAX),
                 referer,
                 origin,
                 cookies: m.cookies.clone().filter(|c| !c.is_empty()),
@@ -962,6 +965,9 @@ fn to_command(m: Message) -> mdm_ipc::Command {
         post_type: m.post.as_ref().and(some(m.post_type)),
         post: m.post,
         private: m.private,
+        // The browser's own download handed over, not the user's explicit "Download with MDM"
+        // (right-click menu, toolbar list): that is an add of its own.
+        browser_handoff: !m.explicit,
         proxy: m.proxy.as_deref().and_then(browser_proxy),
         proxy_pac: m
             .proxy_pac
@@ -1063,6 +1069,8 @@ fn deliver(cmd: &mdm_ipc::Command) -> Result<(), Undelivered> {
         std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg(&bundle)
+            .arg("--args")
+            .arg(mdm_ipc::FROM_HOST)
             .spawn()
             .map_err(|e| {
                 Undelivered::NotRunning(format!("cannot start {}: {e}", bundle.display()))
@@ -1098,9 +1106,11 @@ fn deliver(cmd: &mdm_ipc::Command) -> Result<(), Undelivered> {
 /// Start the app outside the browser's reach: browsers end a host's whole process tree (on
 /// Windows a job object, elsewhere its process group) once it has answered, which would end an
 /// app this host started along with it (MDN, "Native messaging": closing the native app).
+/// Started in the notification area / minimized (#226, #1333); only the dialog opens.
 fn start_detached(app: &std::path::Path) -> io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(app);
+    cmd.arg(mdm_ipc::FROM_HOST);
     // The browser's message pipes are this host's standard streams: never the app's.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -2024,6 +2034,11 @@ mod tests {
             Some("https://videos.test/watch?v=1"),
             "fetched as from its page"
         );
+        assert_eq!(
+            cmd.page_url.as_deref(),
+            Some("https://videos.test/watch?v=1"),
+            "the page it was picked on goes too: the same video picked again is known by it"
+        );
         assert_eq!(cmd.cookies.as_deref(), Some("a=1"));
         assert_eq!(cmd.cookie_jar.len(), 1);
         assert_eq!(cmd.cookie_jar[0].domain, ".cdn.test");
@@ -2788,6 +2803,11 @@ mod tests {
         )
         .unwrap();
         let c = to_command(m);
+        // The download the browser hands over carries its provenance; an explicit add doesn't.
+        assert!(c.browser_handoff);
+        let explicit: Message =
+            serde_json::from_str(r#"{"url":"https://x/a.zip","explicit":true}"#).unwrap();
+        assert!(!to_command(explicit).browser_handoff);
         assert_eq!(c.url.as_deref(), Some("https://x/a.zip"));
         assert_eq!(c.referer.as_deref(), Some("https://x/"));
         assert_eq!(c.cookies.as_deref(), Some("a=1"));

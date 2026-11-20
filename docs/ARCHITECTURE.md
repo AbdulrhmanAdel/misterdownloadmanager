@@ -50,12 +50,15 @@ place; the file's date can follow the server's.
 
 A download's first request (`get`) follows redirects and the pages that lead on to a file by
 themselves (a waiting page's refresh). Sites whose links aren't the file's address have a module
-in `sites/` (Google Drive: `sites/gdrive.rs`; MediaFire: `sites/mediafire.rs`): it turns the link
-into the file's address, reads the site's own pages (a confirmation form, a download button, an
-error page), names its refusals (`Error::Refused`) and, where the file's addresses expire, the
-page that gives a fresh one (`sites::origin`, asked again when a connection meets an expired
-address), with pure functions tested without a network. The lab server plays such a site on its
-real host names for the end-to-end tests (`labserver/src/drive.rs`, `labserver/src/mediafire.rs`).
+in `sites/` (Google Drive: `sites/gdrive.rs`; MediaFire: `sites/mediafire.rs`; Rapidgator:
+`sites/rapidgator.rs`): it turns the link into the file's address, reads the site's own pages (a
+confirmation form, a download button, an error page), names its refusals (`Error::Refused`) and,
+where the file's addresses expire, the page that gives a fresh one (`sites::origin`, asked again
+when a connection meets an expired address, at most once per expiry and never again at once for
+an address it then refused; Rapidgator's page is the browser's tab the download came from,
+`Options::page`), with pure functions tested without a network. The lab server plays such a site
+on its real host names for the end-to-end tests (`labserver/src/drive.rs`,
+`labserver/src/mediafire.rs`, `labserver/src/rapidgator.rs`).
 
 FTP and FTPS (`ftp.rs`) go through the same planner, workers and state: a segment is `REST` +
 `RETR` on a control session instead of a ranged `GET`, `SIZE` and `MDTM` stand in for the
@@ -124,7 +127,11 @@ every system (`crates/app/src/renderer.rs`): when the chosen one can't start, th
 tried, so the windows always open. A watched start with the system's API leaves a marker until
 its first frame is drawn: a start that ends before it (a crash inside the driver), one whose
 first frame doesn't come within 10 seconds (MDM then starts again with OpenGL), or a graphics
-card lost twice in 10 minutes is remembered with its reason, which the menu shows.
+card lost twice in 10 minutes is remembered with its reason, which the menu shows. With OpenGL,
+a window eframe can't paint (its context can't be made current on it, its frame can't be shown)
+is skipped and painted again 100 ms later; one whose paints keep failing for seconds is a lost
+device too (MDM starts again; twice in 10 minutes, OpenGL is remembered as failing on Windows).
+The fork's eframe tells MDM through its viewport hooks (`gl_paint_failed`, #1448).
 
 View → Interface size (`scale.rs`, #262) is egui's zoom factor over the display's own scale:
 every window is laid out in points, so it opens that much larger; one larger than the screen
