@@ -5782,6 +5782,24 @@ menu	Vulkan didn't start here: OpenGL draws	Vulkan didn't start here: OpenGL dra
 #. menu command in the main window
 #. View → Draw with: a greyed note; Vulkan draws the windows through a software renderer instead of a graphics card
 menu	Vulkan draws with a software renderer	Vulkan draws with a software renderer
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&Downloads	&Downloads
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&File	&File
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&Help	&Help
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&More Options	&More Options
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&Tasks	&Tasks
+#. menu bar title in the main window (menus, toolbar, Categories pane)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menubar	&View	&View
 #. toolbar button in the main window
 toolbar	Add Torrent	Add Torrent
 #. toolbar button in the main window

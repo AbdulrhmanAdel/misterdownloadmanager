@@ -72,7 +72,7 @@ OTHER = [
 CONST_ARRAYS = [
     (re.compile(r"pub const TITLES: \[&str; COLS\] = \[(.*?)\];", re.S), "column",
      "column title in the download list"),
-    (re.compile(r"const MENUS: \[\(&str, f32, f32, f32\); 5\] = \[(.*?)\];", re.S), "menubar",
+    (re.compile(r"const MENUS: \[\(&str, f32, f32, f32\); \d+\] = \[(.*?)\];", re.S), "menubar",
      "menu bar title"),
     # Column filters' value lists (list.rs), shown through translating checkboxes.
     (re.compile(r"pub fn filter_values\((.*?)\n\}", re.S), "",
