@@ -13,8 +13,6 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 # Read-only for every job; a job that needs more says so in its own block (publish).

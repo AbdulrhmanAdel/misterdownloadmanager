@@ -11,8 +11,6 @@ name: Docs screenshots
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["docs-shots/**"]
 
 permissions:
   contents: read

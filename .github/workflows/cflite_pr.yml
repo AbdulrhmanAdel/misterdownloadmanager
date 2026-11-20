@@ -5,19 +5,6 @@
 name: Fuzzing (pull request)
 
 on:
-  pull_request:
-    paths:
-      - "crates/cnl/**"
-      - "crates/engine/**"
-      - "crates/extract/**"
-      - "crates/ipc/**"
-      - "crates/tools/**"
-      - "crates/torrent/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "fuzz/**"
-      - ".clusterfuzzlite/**"
-      - ".github/workflows/cflite_pr.yml"
   workflow_dispatch:
 
 permissions: {}

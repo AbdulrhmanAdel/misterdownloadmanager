@@ -6,20 +6,7 @@
 name: Help pictures
 
 on:
-  pull_request:
-    paths:
-      - "docs/**"
-      - "README.md"
-      - "website/**"
-      - "tools/shots/**"
-      - ".github/workflows/help-pictures.yml"
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "README.md"
-      - "website/**"
-      - "tools/shots/**"
+  workflow_dispatch:
 
 permissions:
   contents: read
