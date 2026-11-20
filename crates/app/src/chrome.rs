@@ -163,12 +163,15 @@ pub fn paint_image(ui: &Ui, painter: &egui::Painter, src: egui::ImageSource<'sta
 /// the standard Win32 bar (text at item.x + 7, width = text + 14; light-main.md), in both modes
 /// (user decision 2026-11-01: dark mode only changes colours, never sizes or places; IDM's dark
 /// bar was wider).
-const MENUS: [(&str, f32, f32, f32); 5] = [
+const MENUS: [(&str, f32, f32, f32); 6] = [
     ("&Tasks", 0.0, 42.0, 7.0),
     ("&File", 42.0, 32.0, 49.0),
     ("&Downloads", 74.0, 73.0, 81.0),
     ("&View", 147.0, 39.0, 154.0),
     ("&Help", 186.0, 39.0, 193.0),
+    // This fork's own menu (not IDM's): the commands it adds, after Help. Its rect is estimated
+    // (text + 14, like the others), not measured.
+    ("&More Options", 225.0, 88.0, 232.0),
 ];
 
 /// The menu bar in the interface language: English keeps the measured rects; a translation is

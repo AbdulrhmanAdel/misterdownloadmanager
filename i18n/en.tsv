@@ -5315,6 +5315,10 @@ menu	&Download Now	&Download Now
 #. & marks the keyboard shortcut letter: keep one & before a letter of the translation
 menu	&Exit	&Exit
 #. menu command in the main window
+#. More Options menu: check item: unpack the selected archives into their folder when they have downloaded
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menu	&Extract when done	&Extract when done
+#. menu command in the main window
 #. verb: load downloads from a file
 #. & marks the keyboard shortcut letter: keep one & before a letter of the translation
 menu	&Import	&Import
@@ -5542,8 +5546,14 @@ menu	Emerald	Emerald
 #. verb: unpack the downloaded archive (zip, 7z, rar) into its folder
 menu	Extract	Extract
 #. menu command in the main window
-#. check item: unpack the archive into its folder when it has downloaded
-menu	Extract when done	Extract when done
+#. More Options menu: opens Options on the Archives page (the folder to extract to, and more)
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+#. the trailing ... means it opens a window: keep it
+menu	Extract &options...	Extract &options...
+#. menu command in the main window
+#. More Options menu: check item: extracted files go to the folder set in Options → Archives instead of the archive's own
+#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
+menu	Extract to a &folder of my choice	Extract to a &folder of my choice
 #. menu command in the main window
 #. right-click → Torrent submenu: open the selected torrent's file list
 #. the trailing ... means it opens a window: keep it
@@ -5772,21 +5782,6 @@ menu	Vulkan didn't start here: OpenGL draws	Vulkan didn't start here: OpenGL dra
 #. menu command in the main window
 #. View → Draw with: a greyed note; Vulkan draws the windows through a software renderer instead of a graphics card
 menu	Vulkan draws with a software renderer	Vulkan draws with a software renderer
-#. menu bar title in the main window (menus, toolbar, Categories pane)
-#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
-menubar	&Downloads	&Downloads
-#. menu bar title in the main window (menus, toolbar, Categories pane)
-#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
-menubar	&File	&File
-#. menu bar title in the main window (menus, toolbar, Categories pane)
-#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
-menubar	&Help	&Help
-#. menu bar title in the main window (menus, toolbar, Categories pane)
-#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
-menubar	&Tasks	&Tasks
-#. menu bar title in the main window (menus, toolbar, Categories pane)
-#. & marks the keyboard shortcut letter: keep one & before a letter of the translation
-menubar	&View	&View
 #. toolbar button in the main window
 toolbar	Add Torrent	Add Torrent
 #. toolbar button in the main window

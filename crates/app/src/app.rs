@@ -572,7 +572,12 @@ enum Cmd {
     VerifyChecksum,
     /// Right-click → Extract (beyond IDM, #37): a finished archive, into its folder.
     Extract,
+    /// More Options → Extract when done: for the selected archives that haven't finished.
     ToggleExtract,
+    /// More Options → Extract to a folder of my choice: the Options setting, switched here.
+    ToggleExtractTo,
+    /// More Options → Extract options…: Options, on the Archives page.
+    ArchiveOptions,
     /// Tasks → Link grabber… (#37): the window, empty (links pasted in) or as it is.
     LinkGrabber,
     /// Downloads → Find (Ctrl-F) / Find Next (F3).
@@ -8224,6 +8229,15 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Cmd::ToggleExtractTo => {
+                self.settings.extract_to_custom = !self.settings.extract_to_custom;
+                self.dirty = true;
+            }
+            Cmd::ArchiveOptions => {
+                self.run(Cmd::Options, None, ctx);
+                self.options = self.options.take().map(|o| o.on_page(10));
+                self.raise_options = true;
+            }
             Cmd::VerifyChecksum => {
                 if let Some(id) = target
                     && !self.checksums.iter().any(|c| c.id == id)
@@ -9015,6 +9029,34 @@ impl App {
             // IDM's Help menu, ours (D-020): pages of the user guide (docs/); "Video downloads" stands
             // where IDM has "Grabber Help"; "Report a problem" where "Contact IDM Support";
             // Keyboard shortcuts added; no Tip of the Day.
+            // More Options: this fork's commands. "Extract when done" acts on the selected
+            // downloads, as it did in the right-click menu.
+            5 => {
+                let ids = self.targets(None);
+                let can_toggle = self
+                    .items
+                    .iter()
+                    .any(|i| ids.contains(&i.id) && Self::can_toggle_extract(i));
+                vec![
+                    // i18n: More Options menu: check item: unpack the selected archives into their folder when they have downloaded
+                    I(
+                        "&Extract when done",
+                        Cmd::ToggleExtract,
+                        can_toggle,
+                        self.extract_checked(&ids),
+                    ),
+                    Sep,
+                    // i18n: More Options menu: check item: extracted files go to the folder set in Options → Archives instead of the archive's own
+                    I(
+                        "Extract to a &folder of my choice",
+                        Cmd::ToggleExtractTo,
+                        true,
+                        self.settings.extract_to_custom,
+                    ),
+                    // i18n: More Options menu: opens Options on the Archives page (the folder to extract to, and more)
+                    I("Extract &options...", Cmd::ArchiveOptions, true, false),
+                ]
+            }
             _ => vec![
                 I("H&elp contents", Cmd::HelpPage("README.md"), true, false),
                 I(
@@ -9558,9 +9600,6 @@ impl App {
                 && i.video.is_none()
                 && crate::extractq::archive_name(&i.file_name)
         });
-        let can_toggle = chosen.iter().any(|i| Self::can_toggle_extract(i));
-        let toggle_ids: Vec<u64> = chosen.iter().map(|i| i.id).collect();
-        let extract_on = self.extract_checked(&toggle_ids);
         let torrent = it.and_then(|i| i.torrent.as_ref().map(|t| (i, t)));
         let mut entries = vec![
             // i18n: verb: opens the downloaded file
@@ -9591,13 +9630,6 @@ impl App {
             I("Verify checksum...", Cmd::VerifyChecksum, sel, false),
             // i18n: verb: unpack the downloaded archive (zip, 7z, rar) into its folder
             I("Extract", Cmd::Extract, extractable, false),
-            // i18n: check item: unpack the archive into its folder when it has downloaded
-            I(
-                "Extract when done",
-                Cmd::ToggleExtract,
-                can_toggle,
-                extract_on,
-            ),
             Sep,
             // i18n: verb: removes the download from the list
             I("Remove", Cmd::Remove, any_idle, false),
